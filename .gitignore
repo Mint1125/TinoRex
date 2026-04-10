@@ -1,1 +1,4 @@
-AgentX_2101_0408_v8/.claude/settings.local.json
+__pycache__/
+*.pyc
+.claude/
+src/evaluator/cache/
