@@ -54,7 +54,7 @@ class CriticAgent:
         )
 
         resp = await self.client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-5.4",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": plan},

@@ -674,7 +674,7 @@ class MLAgent:
 
         # Self-repair fallback (direct OpenAI call — Error Handler unreachable)
         resp = await self.client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-5.4",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": (
@@ -720,7 +720,7 @@ class MLAgent:
             print(f"[MLE] Planner unreachable: {e} — using fallback")
         # Fallback: direct OpenAI call
         resp = await self.client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-5.4",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": payload},
@@ -828,7 +828,7 @@ class MLAgent:
         if not code:
             # Fallback: direct OpenAI call
             resp = await self.client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-5.4",
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": codegen_payload},

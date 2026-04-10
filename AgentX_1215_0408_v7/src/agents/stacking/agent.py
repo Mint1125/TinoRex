@@ -259,7 +259,7 @@ def _call_llm(messages: list[dict]) -> str:
     import openai
     client = openai.OpenAI(api_key=_OPENAI_KEY)
     resp = client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-5.4",
         messages=messages,
         temperature=0.3,
         max_tokens=4000,
