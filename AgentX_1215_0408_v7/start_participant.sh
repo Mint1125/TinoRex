@@ -1,6 +1,6 @@
 #!/bin/bash
 # Start all AgentX services inside a single container for AgentBeats submission.
-# Usage: bash start_participant.sh --host 0.0.0.0 --port 9009
+# Usage: bash start_participant.sh --host 0.0.0.0 --port 8000
 
 HOST="0.0.0.0"
 PORT="8000"
@@ -37,9 +37,29 @@ for svc in "${!agents[@]}"; do
     echo "  $svc -> port $p (PID $!)"
 done
 
-# Wait for sub-agents to be ready
-echo "Waiting for sub-agents to start..."
-sleep 5
+# Wait for ALL sub-agents to be ready (poll each port)
+echo "Waiting for all sub-agents to be ready..."
+MAX_WAIT=60
+WAITED=0
+while [ $WAITED -lt $MAX_WAIT ]; do
+    ALL_READY=true
+    for p in 8001 8002 8003 8005 8006 8007 8008 8009 8010 8011 8012; do
+        if ! python -c "import socket; s=socket.socket(); s.settimeout(0.5); s.connect(('127.0.0.1',$p)); s.close()" 2>/dev/null; then
+            ALL_READY=false
+            break
+        fi
+    done
+    if $ALL_READY; then
+        echo "All sub-agents ready after ${WAITED}s"
+        break
+    fi
+    sleep 1
+    WAITED=$((WAITED + 1))
+done
+
+if ! $ALL_READY; then
+    echo "WARNING: Not all sub-agents ready after ${MAX_WAIT}s, starting orchestrator anyway"
+fi
 
 # Start orchestrator in foreground (this is the A2A endpoint)
 echo "Starting orchestrator on $HOST:$PORT..."
