@@ -196,6 +196,15 @@ class MLAgent:
     # ── main flow ─────────────────────────────────────────────────────────────
 
     async def run(self, message: Message, updater: TaskUpdater) -> None:
+        import traceback as _tb
+        try:
+            await self._run_impl(message, updater)
+        except Exception as exc:
+            err_msg = f"[MLE] FATAL: {exc}\n{_tb.format_exc()}"
+            print(err_msg, flush=True)
+            await updater.failed(new_agent_text_message(err_msg[:2000]))
+
+    async def _run_impl(self, message: Message, updater: TaskUpdater) -> None:
         await updater.update_status(
             TaskState.working,
             new_agent_text_message("[MLE] Received task. Extracting competition data..."),
