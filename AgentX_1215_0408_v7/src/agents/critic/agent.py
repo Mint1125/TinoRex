@@ -60,7 +60,7 @@ class CriticAgent:
                 {"role": "user", "content": plan},
             ],
             temperature=0.3,
-            max_tokens=1000,
+            max_completion_tokens=1000,
         )
 
         critique = resp.choices[0].message.content.strip()

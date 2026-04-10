@@ -683,7 +683,7 @@ class MLAgent:
                     f"Return ONLY corrected Python code. No markdown."
                 )},
             ],
-            temperature=0.05, max_tokens=3500,
+            temperature=0.05, max_completion_tokens=3500,
         )
         fixed = resp.choices[0].message.content.strip()
         if fixed.startswith("```"):
@@ -725,7 +725,7 @@ class MLAgent:
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": payload},
             ],
-            temperature=0.3, max_tokens=700,
+            temperature=0.3, max_completion_tokens=700,
         )
         return resp.choices[0].message.content.strip()
 
@@ -833,7 +833,7 @@ class MLAgent:
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": codegen_payload},
                 ],
-                temperature=0.1, max_tokens=4000,
+                temperature=0.1, max_completion_tokens=4000,
             )
             code = resp.choices[0].message.content.strip()
 

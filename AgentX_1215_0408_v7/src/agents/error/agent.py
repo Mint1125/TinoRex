@@ -169,7 +169,7 @@ class ErrorHandlerAgent:
                 )},
             ],
             temperature=0.05,
-            max_tokens=3500,
+            max_completion_tokens=3500,
         )
         fixed = resp.choices[0].message.content.strip()
         if fixed.startswith("```"):

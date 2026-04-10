@@ -51,7 +51,7 @@ class PlannerAgent:
                 {"role": "user", "content": payload},
             ],
             temperature=0.3,
-            max_tokens=600,
+            max_completion_tokens=600,
         )
 
         plan = resp.choices[0].message.content.strip()
