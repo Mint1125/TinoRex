@@ -24,21 +24,45 @@ logger = logging.getLogger(__name__)
 
 _API_KEY_FILE = Path(r"C:/Users/PC4/OneDrive/바탕 화면/개인/개인정보/api_key.txt")
 
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "o4-mini")
 MAX_ITERATIONS = int(os.environ.get("MAX_ITERATIONS", "12"))
 CODE_TIMEOUT = int(os.environ.get("CODE_TIMEOUT", "600"))
 
 
-def _load_api_key() -> str:
-    key = os.environ.get("OPENAI_API_KEY", "")
-    if key:
-        return key
+def _load_api_keys() -> dict[str, str]:
+    """Load all API keys from file. Returns {provider: key}."""
+    keys: dict[str, str] = {}
+    # Check env vars first
+    for env_var, provider in [
+        ("OPENAI_API_KEY", "openai"),
+        ("ANTHROPIC_API_KEY", "anthropic"),
+        ("GOOGLE_API_KEY", "google"),
+    ]:
+        val = os.environ.get(env_var, "")
+        if val:
+            keys[provider] = val
+
     if _API_KEY_FILE.exists():
         lines = _API_KEY_FILE.read_text(encoding="utf-8").splitlines()
         for line in lines:
-            if line.strip():
-                return line.strip()
-    return ""
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("sk-proj-") and "openai" not in keys:
+                keys["openai"] = line
+            elif line.startswith("sk-ant-") and "anthropic" not in keys:
+                keys["anthropic"] = line
+            elif line.startswith("AIza") and "google" not in keys:
+                keys["google"] = line
+    return keys
+
+
+def _load_api_key() -> str:
+    """Legacy: return the key matching the current model's provider."""
+    from llm import _detect_provider
+    provider = _detect_provider(OPENAI_MODEL)
+    keys = _load_api_keys()
+    return keys.get(provider, keys.get("openai", ""))
 
 
 def _extract_tar_b64(b64_text: str, dest: Path) -> None:

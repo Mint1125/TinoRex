@@ -15,7 +15,7 @@
     entrypoint: "bash start_participant.sh --host 0.0.0.0 --port 8000",
     env: {
       OPENAI_API_KEY: "${config.openai_api_key}",
-      OPENAI_MODEL: "gpt-5.4",
+      OPENAI_MODEL: "o4-mini",
     },
     network: {
       endpoints: [
