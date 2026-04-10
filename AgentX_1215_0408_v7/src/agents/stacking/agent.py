@@ -44,9 +44,8 @@ from sklearn.preprocessing import OrdinalEncoder, StandardScaler
 
 # ── LLM client ─────────────────────────────────────────────────────────────────
 
-_API_KEY_FILE = Path(r"C:/Users/PC4/OneDrive/바탕 화면/개인/개인정보/api_key.txt")
-_keys = [l.strip() for l in _API_KEY_FILE.read_text(encoding="utf-8").splitlines() if l.strip()]
-_OPENAI_KEY = _keys[0]
+import os
+_OPENAI_KEY = os.environ["OPENAI_API_KEY"]
 
 
 # ── task type ──────────────────────────────────────────────────────────────────

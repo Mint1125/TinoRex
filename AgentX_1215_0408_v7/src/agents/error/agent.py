@@ -6,12 +6,8 @@ from a2a.types import Message, TaskState
 from a2a.utils import get_message_text, new_agent_text_message
 from openai import AsyncOpenAI
 
-_API_KEY_FILE = Path(r"C:/Users/PC4/OneDrive/바탕 화면/개인/개인정보/api_key.txt")
-OPENAI_API_KEY = [
-    line.strip()
-    for line in _API_KEY_FILE.read_text(encoding="utf-8").splitlines()
-    if line.strip()
-][0]
+import os
+OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 
 SYSTEM_PROMPT = """\
 You are an expert ML Python debugger specializing in data science pipelines.
