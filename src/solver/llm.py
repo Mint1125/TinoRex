@@ -1,11 +1,11 @@
-"""Anthropic client for the tree search solver."""
+"""OpenAI client for the stage-wise solver."""
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
 
-from anthropic import Anthropic
+from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
@@ -17,24 +17,24 @@ class LLMResponse:
 
 
 class LLMClient:
-    def __init__(self, api_key: str, model: str = "claude-opus-4-6"):
+    def __init__(self, api_key: str, model: str = "o4-mini"):
         self.model = model
-        self._client = Anthropic(api_key=api_key)
+        self._client = OpenAI(api_key=api_key)
 
     def generate(self, *, system: str, user: str, temperature: float = 1.0) -> LLMResponse:
-        resp = self._client.messages.create(
+        resp = self._client.chat.completions.create(
             model=self.model,
-            max_tokens=16384,
-            system=system,
             messages=[
+                {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
             temperature=temperature,
         )
-        text = resp.content[0].text if resp.content else ""
+        choice = resp.choices[0]
+        text = choice.message.content or ""
         usage = {
-            "prompt_tokens": resp.usage.input_tokens,
-            "completion_tokens": resp.usage.output_tokens,
+            "prompt_tokens": resp.usage.prompt_tokens if resp.usage else 0,
+            "completion_tokens": resp.usage.completion_tokens if resp.usage else 0,
         }
         return LLMResponse(text=text, usage=usage)
 

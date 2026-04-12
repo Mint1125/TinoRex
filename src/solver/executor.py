@@ -20,7 +20,7 @@ TERMINAL_STATES = {
 
 class Executor(AgentExecutor):
     def __init__(self):
-        self.agents: dict[str, object] = {}
+        pass
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         msg = context.message
@@ -39,13 +39,11 @@ class Executor(AgentExecutor):
             task = new_task(msg)
             await event_queue.enqueue_event(task)
 
-        context_id = task.context_id
-        agent = self.agents.get(context_id)
-        if not agent:
-            from agent import Agent
-            agent = Agent()
-            self.agents[context_id] = agent
+        # Each request gets a fresh Agent — session state is in the shared workdir
+        from agent import Agent
+        agent = Agent()
 
+        context_id = task.context_id
         updater = TaskUpdater(event_queue, task.id, context_id)
         await updater.start_work()
         try:
