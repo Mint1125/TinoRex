@@ -4,9 +4,9 @@
   config_schema: {
     type: "object",
     properties: {
-      openai_api_key: { type: "string", secret: true },
+      anthropic_api_key: { type: "string", secret: true },
     },
-    required: ["openai_api_key"],
+    required: ["anthropic_api_key"],
     additionalProperties: false,
   },
 
@@ -14,8 +14,8 @@
     image: "ghcr.io/mint1125/tinorex:latest",
     entrypoint: "bash start_participant.sh --host 0.0.0.0 --port 8000",
     env: {
-      OPENAI_API_KEY: "${config.openai_api_key}",
-      OPENAI_MODEL: "o4-mini",
+      ANTHROPIC_API_KEY: "${config.anthropic_api_key}",
+      ANTHROPIC_MODEL: "claude-opus-4-6",
     },
     network: {
       endpoints: [
