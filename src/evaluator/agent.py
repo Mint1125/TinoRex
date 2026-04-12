@@ -185,7 +185,7 @@ class Agent:
 
         submission_csv: bytes | None = None
 
-        async with httpx.AsyncClient(timeout=3600) as httpx_client:
+        async with httpx.AsyncClient(timeout=14400) as httpx_client:
             resolver = A2ACardResolver(httpx_client=httpx_client, base_url=agent_url)
             agent_card = await resolver.get_agent_card()
             config = ClientConfig(httpx_client=httpx_client, streaming=True)

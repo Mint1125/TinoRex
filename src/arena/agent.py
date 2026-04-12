@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 SOLVER_URL = os.environ.get("SOLVER_URL", "http://127.0.0.1:8001/")
 STRATEGIES = os.environ.get("STRATEGIES", "quick_baseline,data_first,big_model,ensemble_focus,feature_heavy").split(",")
+MAX_CONCURRENT_SOLVERS = int(os.environ.get("MAX_CONCURRENT_SOLVERS", "2"))
 
 
 def _first_tar_from_message(message: Message) -> str | None:
@@ -156,11 +157,18 @@ class Agent:
             ),
         )
 
-        # Fan out to solver with different strategies in parallel
-        tasks = [
-            _run_solver(SOLVER_URL, strategy, instructions_text, tar_b64)
-            for strategy in STRATEGIES
-        ]
+        # Fan out to solver with concurrency limit to avoid resource contention
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_SOLVERS)
+
+        async def _limited_run(strategy: str) -> dict | None:
+            async with semaphore:
+                await updater.update_status(
+                    TaskState.working,
+                    new_agent_text_message(f"Arena: starting solver (strategy={strategy})"),
+                )
+                return await _run_solver(SOLVER_URL, strategy, instructions_text, tar_b64)
+
+        tasks = [_limited_run(strategy) for strategy in STRATEGIES]
         results = await asyncio.gather(*tasks)
 
         # Collect successful results
