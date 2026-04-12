@@ -26,6 +26,7 @@ from ml_helpers import patch_submission_columns, validate_submission_report
 logger = logging.getLogger(__name__)
 
 MAX_STDOUT_CHARS = 8000
+STDOUT_FEEDBACK_CHARS = 6000
 
 SYSTEM_PROMPT = """\
 You are an expert ML engineer competing in a Kaggle-style competition.
@@ -57,6 +58,8 @@ Rules:
   (d) ID column values match sample_submission.csv
 - If you are unsure about prediction values, use safe defaults (mean of train \
 target for regression, mode for classification).
+- You may save intermediate artifacts (features, models) to the working directory \
+for potential reuse by later iterations. Use pickle or joblib for caching.
 """
 
 INITIAL_PROMPT = """\
@@ -74,8 +77,7 @@ CV_SCORE=<float> and save ./submission.csv.
 """
 
 IMPROVE_PROMPT = """\
-Competition description:
-{description}
+{description_section}
 
 Your previous best solution (CV_SCORE={parent_score}):
 ```python
@@ -91,6 +93,10 @@ Execution output (truncated):
 
 {validation_feedback}
 
+{history_section}
+
+Strategy bias: {strategy}
+
 Make ONE specific improvement to increase the CV score.  Return the COMPLETE \
 updated Python script.  Do not remove the CV_SCORE print.  Do not remove the \
 submission.csv save.
@@ -105,15 +111,16 @@ CRITICAL submission requirements:
 Focus on: {improvement_hint}
 """
 
+# Ordered: early = safe/fast, late = complex/expensive
 IMPROVEMENT_HINTS = [
+    "fixing any errors or warnings from the previous run",
+    "better preprocessing (missing value handling, encoding, scaling)",
     "better feature engineering (interactions, aggregations, domain-specific transforms)",
     "trying a different model family or algorithm",
     "hyperparameter tuning (learning rate, depth, regularization)",
-    "better preprocessing (missing value handling, encoding, scaling)",
-    "ensemble or blending multiple models",
-    "fixing any errors or warnings from the previous run",
-    "better cross-validation strategy (stratified, grouped, time-based)",
     "data cleaning (outlier removal, deduplication, type casting)",
+    "better cross-validation strategy (stratified, grouped, time-based)",
+    "ensemble or blending multiple models",
 ]
 
 RECOVERY_ITERATIONS = 3
@@ -130,6 +137,7 @@ class SolutionNode:
     parent_id: int | None = None
     iteration: int = 0
     validation_report: dict | None = None
+    hint_used: str = ""
 
 
 @dataclass
@@ -147,13 +155,18 @@ class SolutionTree:
         llm: LLMClient,
         max_iterations: int = 12,
         code_timeout: int = 600,
+        strategy_name: str = "",
     ):
         self.workdir = workdir
         self.llm = llm
         self.max_iterations = max_iterations
         self.code_timeout = code_timeout
+        self.strategy_name = strategy_name
         self.nodes: list[SolutionNode] = []
         self._next_id = 0
+        # Cached after first call
+        self._file_listing: str | None = None
+        self._description: str | None = None
 
     def _new_id(self) -> int:
         nid = self._next_id
@@ -161,6 +174,8 @@ class SolutionTree:
         return nid
 
     def _list_files(self) -> str:
+        if self._file_listing is not None:
+            return self._file_listing
         data_dir = self.workdir / "home" / "data"
         if not data_dir.exists():
             data_dir = self.workdir
@@ -170,17 +185,22 @@ class SolutionTree:
                 rel = p.relative_to(self.workdir)
                 size_mb = p.stat().st_size / (1024 * 1024)
                 entries.append(f"  ./{rel}  ({size_mb:.1f} MB)")
-        return "\n".join(entries) if entries else "  <no files found>"
+        self._file_listing = "\n".join(entries) if entries else "  <no files found>"
+        return self._file_listing
 
     def _read_description(self) -> str:
+        if self._description is not None:
+            return self._description
         for name in ("description.md", "description.txt", "README.md"):
             path = self.workdir / "home" / "data" / name
             if path.exists():
                 text = path.read_text(encoding="utf-8", errors="replace")
                 if len(text) > 12000:
                     text = text[:12000] + "\n... (truncated)"
-                return text
-        return "<no description file found>"
+                self._description = text
+                return self._description
+        self._description = "<no description file found>"
+        return self._description
 
     def _execute(self, code: str) -> tuple[float | None, str, float, str | None, dict]:
         """Run code, return (cv_score, stdout, exec_time, error, validation_report)."""
@@ -203,7 +223,6 @@ class SolutionTree:
         submission_path = self.workdir / "submission.csv"
         if submission_path.exists():
             validation = validate_submission_report(submission_path, self.workdir)
-            # Auto-patch fixable issues
             if not validation["valid"]:
                 patch_submission_columns(submission_path, self.workdir)
                 validation = validate_submission_report(submission_path, self.workdir)
@@ -228,6 +247,43 @@ class SolutionTree:
             except ValueError:
                 return None
         return None
+
+    def _format_stdout_feedback(self, node: SolutionNode) -> str:
+        """Format stdout for IMPROVE_PROMPT: show more context, head+tail for errors."""
+        stdout = node.stdout
+        if not stdout:
+            return "<no output>"
+
+        if node.error and len(stdout) > STDOUT_FEEDBACK_CHARS:
+            # For errors: show head (setup/data info) + tail (traceback)
+            head_n = STDOUT_FEEDBACK_CHARS // 3
+            tail_n = STDOUT_FEEDBACK_CHARS - head_n - 60
+            return (
+                stdout[:head_n]
+                + "\n...[middle truncated]...\n"
+                + stdout[-tail_n:]
+            )
+
+        # For success: show tail (most recent output with scores)
+        if len(stdout) > STDOUT_FEEDBACK_CHARS:
+            return stdout[-STDOUT_FEEDBACK_CHARS:]
+
+        return stdout
+
+    def _build_history_section(self) -> str:
+        """Build a summary of all previous attempts for the LLM."""
+        if len(self.nodes) <= 1:
+            return ""
+        lines = ["Previous attempts (do NOT repeat failed approaches):"]
+        for n in self.nodes:
+            score_str = f"CV={n.cv_score:.4f}" if n.cv_score is not None else "no score"
+            status = "OK" if n.error is None else f"ERROR({n.error})"
+            valid = "valid" if (n.validation_report and n.validation_report.get("valid")) else "invalid"
+            hint = n.hint_used or "initial"
+            lines.append(
+                f"  - Node {n.node_id} [{hint}]: {score_str}, {status}, submission={valid}"
+            )
+        return "\n".join(lines)
 
     def _select_parent(self, iteration: int) -> SolutionNode:
         """Select parent with diversity: epsilon-greedy + lineage rotation."""
@@ -259,7 +315,6 @@ class SolutionTree:
 
     def _best_node(self) -> SolutionNode | None:
         """Return the best node that has a valid submission and a score."""
-        # Prefer nodes with valid submissions
         valid_sub = [
             n for n in self.nodes
             if n.cv_score is not None
@@ -269,12 +324,10 @@ class SolutionTree:
         if valid_sub:
             return max(valid_sub, key=lambda n: n.cv_score)
 
-        # Fallback: any node with a score
         scored = [n for n in self.nodes if n.cv_score is not None]
         if scored:
             return max(scored, key=lambda n: n.cv_score)
 
-        # Last resort: any node without an error
         no_error = [n for n in self.nodes if n.error is None]
         return no_error[-1] if no_error else (self.nodes[-1] if self.nodes else None)
 
@@ -291,6 +344,17 @@ class SolutionTree:
         if report.get("warnings"):
             return "Submission warnings:\n" + "\n".join(report["warnings"])
         return "Submission validation: OK (all checks passed)."
+
+    def _build_description_section(self, iteration: int) -> str:
+        """Full description for early nodes, abbreviated for later ones to save tokens."""
+        desc = self._read_description()
+        files = self._list_files()
+        if iteration <= 2:
+            return f"Competition description:\n{desc}\n\nFiles available:\n{files}"
+        # After node 2, use abbreviated version
+        if len(desc) > 3000:
+            desc = desc[:3000] + "\n... (see full description in earlier iterations)"
+        return f"Competition description (abbreviated):\n{desc}"
 
     def run(
         self,
@@ -322,6 +386,7 @@ class SolutionTree:
             parent_id=None,
             iteration=0,
             validation_report=validation,
+            hint_used=self.strategy_name or "initial",
         )
         self.nodes.append(node0)
         logger.info(
@@ -345,14 +410,19 @@ class SolutionTree:
                 )
 
             validation_feedback = self._build_validation_feedback(parent)
+            history_section = self._build_history_section()
+            description_section = self._build_description_section(iteration)
+            stdout_feedback = self._format_stdout_feedback(parent)
 
             user_prompt = IMPROVE_PROMPT.format(
-                description=description,
+                description_section=description_section,
                 parent_score=parent.cv_score if parent.cv_score is not None else "N/A (no score produced)",
                 parent_code=parent.code,
-                parent_stdout=parent.stdout[-3000:] if parent.stdout else "<no output>",
+                parent_stdout=stdout_feedback,
                 error_context=error_context,
                 validation_feedback=validation_feedback,
+                history_section=history_section,
+                strategy=strategy,
                 improvement_hint=hint,
             )
             code = self.llm.generate_code(system=SYSTEM_PROMPT, user=user_prompt)
@@ -368,6 +438,7 @@ class SolutionTree:
                 parent_id=parent.node_id,
                 iteration=iteration,
                 validation_report=validation,
+                hint_used=hint.split("(")[0].strip(),
             )
             self.nodes.append(node)
             logger.info(
@@ -385,16 +456,14 @@ class SolutionTree:
         if best and (best.error or not submission_path.exists()):
             logger.info("Recovery phase: best node has issues, attempting recovery")
 
-            # Try re-running the best-scoring code
             if best.code:
                 cv_score, stdout, exec_time, error, validation = self._execute(best.code)
                 if submission_path.exists():
                     patch_submission_columns(submission_path, self.workdir)
                     best = self._best_node()
 
-            # If still no submission, try LLM recovery
             if not submission_path.exists():
-                logger.info("Recovery: no submission.csv, running %d LLM recovery steps", RECOVERY_ITERATIONS)
+                logger.info("Recovery: running %d LLM recovery steps", RECOVERY_ITERATIONS)
                 for ri in range(RECOVERY_ITERATIONS):
                     recovery_prompt = (
                         f"Competition description:\n{description}\n\n"
@@ -417,12 +486,12 @@ class SolutionTree:
                             exec_time=exec_time, error=error,
                             parent_id=None, iteration=self.max_iterations + ri,
                             validation_report=validation,
+                            hint_used="recovery",
                         )
                         self.nodes.append(node)
                         logger.info("Recovery step %d succeeded: cv_score=%s", ri, cv_score)
                         break
 
-            # Last resort: copy sample_submission.csv
             if not submission_path.exists():
                 sample_paths = list((self.workdir / "home" / "data").glob("sample_submission*.csv"))
                 if sample_paths:

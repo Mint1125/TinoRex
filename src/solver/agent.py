@@ -153,6 +153,7 @@ class Agent:
                 llm=llm,
                 max_iterations=MAX_ITERATIONS,
                 code_timeout=CODE_TIMEOUT,
+                strategy_name=strategy_name,
             )
 
             loop = __import__("asyncio").get_running_loop()
