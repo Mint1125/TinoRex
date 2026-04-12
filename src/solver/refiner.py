@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 from pathlib import Path
 
 from llm import LLMClient
@@ -32,7 +33,8 @@ Write SHORT code snippets (NOT complete scripts). You can:
 
 Rules:
 - Print CV_SCORE=<float> after every re-evaluation.
-- Save ./submission.csv when you have improved predictions.
+- ALWAYS save ./submission.csv at the end of each snippet after making predictions.
+  Use: submission.to_csv('./submission.csv', index=False)
 - Keep snippets focused — ONE improvement per turn.
 - Do NOT reload data from files unless necessary — use existing variables.
 - import warnings; warnings.filterwarnings('ignore') at the start if needed.
@@ -51,6 +53,10 @@ Current best CV_SCORE={best_score}
 Refinement step {step}/{max_steps}
 
 Write a SHORT Python code snippet for ONE improvement. Do NOT rewrite everything from scratch.
+IMPORTANT: After predicting, ALWAYS save submission.csv:
+  submission.to_csv('./submission.csv', index=False)
+  print('Saved submission.csv')
+
 Focus on: {focus}
 """
 
@@ -93,7 +99,11 @@ def refine(
     """Run persistent-session refinement on the best tree search result.
 
     Returns (best_cv_score, improved: bool).
+    Backs up submission.csv before each step and restores if score drops.
     """
+    submission_path = workdir / "submission.csv"
+    backup_path = workdir / "_submission_backup.csv"
+
     interp = PersistentInterpreter(workdir=workdir, timeout=timeout_per_step)
     try:
         interp.start()
@@ -114,7 +124,11 @@ def refine(
             logger.warning("Refinement: no CV_SCORE from initial execution, skipping")
             return None, False
 
-        # Truncate data profile for prompt efficiency
+        # Backup the initial (known-good) submission
+        if submission_path.exists():
+            shutil.copy2(submission_path, backup_path)
+            logger.info("Refinement: backed up initial submission.csv")
+
         profile_for_prompt = _truncate(data_profile, 3000)
 
         # Steps 1-N: iterative improvement
@@ -138,22 +152,42 @@ def refine(
             result = interp.run(snippet)
             last_output = _truncate(result.output, MAX_OUTPUT_CHARS)
 
+            if result.error:
+                logger.warning(
+                    "Refinement step %d: error=%s, restoring backup",
+                    step, result.error,
+                )
+                # Restore backup on error
+                if backup_path.exists():
+                    shutil.copy2(backup_path, submission_path)
+                continue
+
             score = _parse_cv_score(result.output)
             logger.info(
-                "Refinement step %d/%d: cv_score=%s error=%s time=%.1fs",
-                step, max_steps, score, result.error, result.exec_time,
+                "Refinement step %d/%d: cv_score=%s time=%.1fs",
+                step, max_steps, score, result.exec_time,
             )
 
-            if score is not None and (best_score is None or score > best_score):
+            if score is not None and score > best_score:
                 best_score = score
-                # Make sure submission is saved
-                if not (workdir / "submission.csv").exists():
-                    interp.run(
-                        "import pandas as pd\n"
-                        "if 'submission' in dir() and isinstance(submission, pd.DataFrame):\n"
-                        "    submission.to_csv('./submission.csv', index=False)\n"
-                        "    print('Saved submission.csv')\n"
-                    )
+                # Update backup with the improved submission
+                if submission_path.exists():
+                    shutil.copy2(submission_path, backup_path)
+                    logger.info("Refinement step %d: improved! new best=%s", step, best_score)
+            elif score is not None and score < best_score:
+                # Score dropped — restore backup
+                logger.info(
+                    "Refinement step %d: score dropped %s -> %s, restoring backup",
+                    step, best_score, score,
+                )
+                if backup_path.exists():
+                    shutil.copy2(backup_path, submission_path)
+
+        # Ensure the best submission is in place
+        if backup_path.exists():
+            if not submission_path.exists():
+                shutil.copy2(backup_path, submission_path)
+            backup_path.unlink(missing_ok=True)
 
         improved = best_score is not None and initial_score is not None and best_score > initial_score
         logger.info(
@@ -164,3 +198,8 @@ def refine(
 
     finally:
         interp.cleanup()
+        # Safety: ensure backup doesn't leak
+        if backup_path.exists():
+            if not submission_path.exists():
+                shutil.copy2(backup_path, submission_path)
+            backup_path.unlink(missing_ok=True)

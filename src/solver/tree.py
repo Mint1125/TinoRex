@@ -354,12 +354,16 @@ class SolutionTree:
         """Full description for early nodes, abbreviated for later ones to save tokens."""
         desc = self._read_description()
         files = self._list_files()
+        profile = ""
+        if self._data_profile:
+            profile_text = self._data_profile[:3000] if len(self._data_profile) > 3000 else self._data_profile
+            profile = f"\n\nData profile (auto-generated):\n{profile_text}"
         if iteration <= 2:
-            return f"Competition description:\n{desc}\n\nFiles available:\n{files}"
+            return f"Competition description:\n{desc}\n\nFiles available:\n{files}{profile}"
         # After node 2, use abbreviated version
         if len(desc) > 3000:
             desc = desc[:3000] + "\n... (see full description in earlier iterations)"
-        return f"Competition description (abbreviated):\n{desc}"
+        return f"Competition description (abbreviated):\n{desc}{profile}"
 
     def run(
         self,
@@ -520,6 +524,14 @@ class SolutionTree:
         # Final patch on whatever submission we have
         if submission_path.exists():
             patch_submission_columns(submission_path, self.workdir)
+
+        # -- Re-execute best node to ensure its submission.csv is current ------
+        best = self._best_node()
+        if best and best.code:
+            logger.info("Re-executing best node %d to ensure submission.csv is current", best.node_id)
+            cv_score, stdout, exec_time, error, validation = self._execute(best.code)
+            if submission_path.exists():
+                patch_submission_columns(submission_path, self.workdir)
 
         # -- Phase 3: Persistent session refinement ---------------------------
         best = self._best_node()
