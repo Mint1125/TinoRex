@@ -22,6 +22,8 @@ from typing import Any
 from interpreter import Interpreter
 from llm import LLMClient
 from ml_helpers import patch_submission_columns, validate_submission_report
+from profiler import run_profiler
+from refiner import refine
 
 logger = logging.getLogger(__name__)
 
@@ -156,17 +158,20 @@ class SolutionTree:
         max_iterations: int = 12,
         code_timeout: int = 600,
         strategy_name: str = "",
+        refine_steps: int = 5,
     ):
         self.workdir = workdir
         self.llm = llm
         self.max_iterations = max_iterations
         self.code_timeout = code_timeout
         self.strategy_name = strategy_name
+        self.refine_steps = refine_steps
         self.nodes: list[SolutionNode] = []
         self._next_id = 0
         # Cached after first call
         self._file_listing: str | None = None
         self._description: str | None = None
+        self._data_profile: str | None = None
 
     def _new_id(self) -> int:
         nid = self._next_id
@@ -361,18 +366,32 @@ class SolutionTree:
         strategy: str,
         on_node_complete: Any = None,
     ) -> TreeSearchResult:
-        """Run the full tree search loop."""
+        """Run the full tree search loop with profiling and refinement phases."""
         start_time = time.time()
         description = self._read_description()
         file_listing = self._list_files()
 
+        # -- Phase 1: Data profiling -----------------------------------------
+        logger.info("Phase 1: Running data profiler")
+        try:
+            self._data_profile = run_profiler(self.workdir, timeout=60)
+            logger.info("Data profile: %d chars", len(self._data_profile))
+        except Exception as exc:
+            logger.warning("Profiler failed: %s", exc)
+            self._data_profile = ""
+
+        # -- Phase 2: Tree search --------------------------------------------
         # -- Node 0: initial solution ----------------------------------------
         logger.info("Generating initial solution (strategy=%s)", strategy)
+        profile_section = ""
+        if self._data_profile:
+            profile_text = self._data_profile[:4000] if len(self._data_profile) > 4000 else self._data_profile
+            profile_section = f"\nData profile (auto-generated):\n{profile_text}\n"
         user_prompt = INITIAL_PROMPT.format(
             description=description,
             file_listing=file_listing,
             strategy=strategy,
-        )
+        ) + profile_section
         code = self.llm.generate_code(system=SYSTEM_PROMPT, user=user_prompt)
         cv_score, stdout, exec_time, error, validation = self._execute(code)
 
@@ -501,6 +520,33 @@ class SolutionTree:
         # Final patch on whatever submission we have
         if submission_path.exists():
             patch_submission_columns(submission_path, self.workdir)
+
+        # -- Phase 3: Persistent session refinement ---------------------------
+        best = self._best_node()
+        if best and best.code and best.cv_score is not None and self.refine_steps > 0:
+            logger.info(
+                "Phase 3: Refining best node %d (cv_score=%s) with %d persistent session steps",
+                best.node_id, best.cv_score, self.refine_steps,
+            )
+            try:
+                refine_score, improved = refine(
+                    workdir=self.workdir,
+                    best_code=best.code,
+                    llm=self.llm,
+                    data_profile=self._data_profile or "",
+                    max_steps=self.refine_steps,
+                    timeout_per_step=self.code_timeout,
+                )
+                if improved and refine_score is not None:
+                    logger.info(
+                        "Refinement improved score: %s -> %s",
+                        best.cv_score, refine_score,
+                    )
+                    # Re-patch submission after refinement
+                    if submission_path.exists():
+                        patch_submission_columns(submission_path, self.workdir)
+            except Exception as exc:
+                logger.warning("Refinement phase failed: %s", exc)
 
         best = self._best_node()
         total_time = time.time() - start_time

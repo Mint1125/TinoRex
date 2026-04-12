@@ -28,6 +28,7 @@ _API_KEY_FILE = Path(r"C:/Users/PC4/OneDrive/바탕 화면/개인/개인정보/a
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "o4-mini")
 MAX_ITERATIONS = int(os.environ.get("MAX_ITERATIONS", "15"))
 CODE_TIMEOUT = int(os.environ.get("CODE_TIMEOUT", "600"))
+REFINE_STEPS = int(os.environ.get("REFINE_STEPS", "5"))
 
 
 def _load_api_keys() -> dict[str, str]:
@@ -154,6 +155,7 @@ class Agent:
                 max_iterations=MAX_ITERATIONS,
                 code_timeout=CODE_TIMEOUT,
                 strategy_name=strategy_name,
+                refine_steps=REFINE_STEPS,
             )
 
             loop = __import__("asyncio").get_running_loop()
