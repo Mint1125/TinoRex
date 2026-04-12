@@ -1,8 +1,8 @@
-"""Arena agent: dispatches competition to solver with multiple strategies, picks best result.
+"""Arena agent v9: dispatches competition to solver with multiple strategies.
 
-The arena is the entry point that the evaluator talks to.  It receives the
-competition tar.gz, fans out to the solver agent with different strategy seeds
-(structural pass@k), collects all submissions, and returns the single best one.
+Fans out to solver with different strategy configs, collects submissions,
+returns the best one. Each strategy controls the balance between deterministic
+baseline, tree search depth, and refinement intensity.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import base64
 import json
 import logging
 import os
+import re
 from uuid import uuid4
 
 import httpx
@@ -34,7 +35,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 SOLVER_URL = os.environ.get("SOLVER_URL", "http://127.0.0.1:8001/")
-STRATEGIES = os.environ.get("STRATEGIES", "quick_baseline,data_first,big_model").split(",")
+STRATEGIES = os.environ.get("STRATEGIES", "balanced,explore_heavy,refine_heavy").split(",")
 MAX_CONCURRENT_SOLVERS = int(os.environ.get("MAX_CONCURRENT_SOLVERS", "2"))
 
 
@@ -58,7 +59,7 @@ async def _run_solver(
     instructions_text: str,
     tar_b64: str,
 ) -> dict | None:
-    """Send a competition to the solver with a specific strategy. Returns submission info or None."""
+    """Send a competition to the solver with a specific strategy."""
     try:
         async with httpx.AsyncClient(timeout=7200) as hc:
             resolver = A2ACardResolver(httpx_client=hc, base_url=solver_url)
@@ -118,9 +119,8 @@ async def _run_solver(
         return None
 
 
-def _extract_cv_score(summary: str) -> float:
+def _extract_best_score(summary: str) -> float:
     """Parse best_score from the solver summary text."""
-    import re
     match = re.search(r"best_score=([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)", summary)
     if match:
         try:
@@ -152,12 +152,11 @@ class Agent:
         await updater.update_status(
             TaskState.working,
             new_agent_text_message(
-                f"Arena: launching {len(STRATEGIES)} solver attempts "
+                f"Arena v9: launching {len(STRATEGIES)} solver attempts "
                 f"(strategies: {STRATEGIES})"
             ),
         )
 
-        # Fan out to solver with concurrency limit to avoid resource contention
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_SOLVERS)
 
         async def _limited_run(strategy: str) -> dict | None:
@@ -171,11 +170,8 @@ class Agent:
         tasks = [_limited_run(strategy) for strategy in STRATEGIES]
         results = await asyncio.gather(*tasks)
 
-        # Collect successful results
         successful = [r for r in results if r is not None]
-        logger.info(
-            "Arena: %d/%d attempts succeeded", len(successful), len(STRATEGIES)
-        )
+        logger.info("Arena: %d/%d attempts succeeded", len(successful), len(STRATEGIES))
 
         if not successful:
             await updater.add_artifact(
@@ -184,14 +180,13 @@ class Agent:
             )
             return
 
-        # Pick the best by CV score
-        best = max(successful, key=lambda r: _extract_cv_score(r["summary"]))
+        best = max(successful, key=lambda r: _extract_best_score(r["summary"]))
 
         await updater.update_status(
             TaskState.working,
             new_agent_text_message(
                 f"Arena: best strategy={best['strategy']} "
-                f"(score={_extract_cv_score(best['summary'])}), "
+                f"(score={_extract_best_score(best['summary'])}), "
                 f"{len(successful)}/{len(STRATEGIES)} succeeded"
             ),
         )

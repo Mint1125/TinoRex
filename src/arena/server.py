@@ -21,24 +21,26 @@ def main():
     args = parser.parse_args()
 
     skill = AgentSkill(
-        id="arena_tournament",
-        name="Arena Tournament",
+        id="arena_hybrid",
+        name="Arena Hybrid Tournament",
         description=(
-            "Receives a competition bundle and fans out to multiple solver "
-            "attempts with different strategies.  Returns the best submission."
+            "v9 Hybrid: Receives a competition bundle and fans out to multiple "
+            "solver attempts with different strategy profiles (balanced, explore-heavy, "
+            "refine-heavy). Each solver runs deterministic baseline + LLM tree search + "
+            "refinement. Returns the best submission."
         ),
-        tags=["arena", "tournament", "mle-bench", "pass-at-k"],
+        tags=["arena", "hybrid", "mle-bench", "pass-at-k"],
         examples=[],
     )
 
     agent_card = AgentCard(
-        name="AgentX Arena",
+        name="TinoRex Arena v9",
         description=(
-            "Tournament host that dispatches ML competitions to tree-search "
-            "solvers with diverse strategies and returns the best result."
+            "Hybrid tournament host: dispatches ML competitions to v9 solvers "
+            "that combine deterministic baselines with toolkit-augmented tree search."
         ),
         url=args.card_url or f"http://{args.host}:{args.port}/",
-        version="1.0.0",
+        version="9.0.0",
         default_input_modes=["text/plain"],
         default_output_modes=["text/plain"],
         capabilities=AgentCapabilities(streaming=True),

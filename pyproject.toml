@@ -1,7 +1,7 @@
 [project]
 name = "agentx"
-version = "2.0.0"
-description = "Arena-based tree-search ML agent for MLE-Bench competitions"
+version = "9.0.0"
+description = "Hybrid ML agent: deterministic baseline + toolkit-augmented tree search"
 requires-python = ">=3.11"
 dependencies = [
     "a2a-sdk[http-server]>=0.3.0",
