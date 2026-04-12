@@ -278,7 +278,7 @@ class ReactMLAgent:
     def run(
         self,
         instructions: str,
-        on_step: callable = None,
+        on_step=None,
     ) -> Path | None:
         """Run the ReAct agent loop. Returns path to submission.csv or None."""
         try:

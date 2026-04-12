@@ -21,26 +21,26 @@ def main():
     args = parser.parse_args()
 
     skill = AgentSkill(
-        id="arena_hybrid",
-        name="Arena Hybrid Tournament",
+        id="arena_pipeline",
+        name="Arena Explore-Select-Refine Pipeline",
         description=(
-            "v9 Hybrid: Receives a competition bundle and fans out to multiple "
-            "solver attempts with different strategy profiles (balanced, explore-heavy, "
-            "refine-heavy). Each solver runs deterministic baseline + LLM tree search + "
-            "refinement. Returns the best submission."
+            "v10 Pipeline: Orchestrates Explore → Select → Refine. "
+            "Phase 1: fans out N short exploration branches with diverse hints. "
+            "Phase 2: selects best by CV score. "
+            "Phase 3: deep refinement on the winner. Returns best submission."
         ),
-        tags=["arena", "hybrid", "mle-bench", "pass-at-k"],
+        tags=["arena", "pipeline", "explore-refine", "mle-bench"],
         examples=[],
     )
 
     agent_card = AgentCard(
-        name="TinoRex Arena v9",
+        name="TinoRex Arena v10",
         description=(
-            "Hybrid tournament host: dispatches ML competitions to v9 solvers "
-            "that combine deterministic baselines with toolkit-augmented tree search."
+            "Pipeline orchestrator: Explore → Select → Refine. "
+            "Dispatches diverse short explorations, selects best, then deep-refines the winner."
         ),
         url=args.card_url or f"http://{args.host}:{args.port}/",
-        version="9.0.0",
+        version="10.0.0",
         default_input_modes=["text/plain"],
         default_output_modes=["text/plain"],
         capabilities=AgentCapabilities(streaming=True),

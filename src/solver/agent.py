@@ -96,15 +96,16 @@ def _first_tar_from_message(message: Message) -> str | None:
     return None
 
 
-def _parse_strategy(message: Message) -> str:
+def _parse_config(message: Message) -> dict:
+    """Parse arena payload: {strategy, max_iterations, extra_instructions}."""
     text = get_message_text(message)
     try:
         payload = json.loads(text)
         if isinstance(payload, dict):
-            return payload.get("strategy", DEFAULT_STRATEGY)
+            return payload
     except (json.JSONDecodeError, TypeError):
         pass
-    return DEFAULT_STRATEGY
+    return {}
 
 
 def _parse_cv_score(stdout: str) -> float | None:
@@ -134,8 +135,14 @@ class Agent:
             )
             return
 
-        strategy_name = _parse_strategy(message)
+        config = _parse_config(message)
+        strategy_name = config.get("strategy", DEFAULT_STRATEGY)
         strategy_text = get_strategy(strategy_name)
+        try:
+            iter_override = int(config["max_iterations"])
+        except (KeyError, TypeError, ValueError):
+            iter_override = None
+        extra_instructions = config.get("extra_instructions", "")
 
         api_key = _load_api_key()
         if not api_key:
@@ -145,11 +152,13 @@ class Agent:
             )
             return
 
+        max_iter = iter_override if iter_override else MAX_ITERATIONS
+
         await updater.update_status(
             TaskState.working,
             new_agent_text_message(
                 f"ReAct Solver starting (strategy={strategy_name}, model={OPENAI_MODEL}, "
-                f"max_steps={MAX_ITERATIONS})"
+                f"max_steps={max_iter})"
             ),
         )
 
@@ -189,14 +198,16 @@ class Agent:
             await updater.update_status(
                 TaskState.working,
                 new_agent_text_message(
-                    f"Phase 2: ReAct agent ({MAX_ITERATIONS} steps, strategy={strategy_name})..."
+                    f"Phase 2: ReAct agent ({max_iter} steps, strategy={strategy_name})..."
                 ),
             )
 
             llm = LLMClient(api_key=api_key, model=OPENAI_MODEL)
 
-            # Build instructions from the evaluator message
+            # Build instructions
             instructions = get_message_text(message) or ""
+            if extra_instructions:
+                instructions = f"{instructions}\n\n{extra_instructions}"
 
             def on_step(step, total, cv_score):
                 try:
@@ -217,7 +228,7 @@ class Agent:
                 agent = ReactMLAgent(
                     workdir=workdir,
                     llm=llm,
-                    max_iterations=MAX_ITERATIONS,
+                    max_iterations=max_iter,
                     code_timeout=CODE_TIMEOUT,
                     exploration_hint=strategy_text,
                 )
@@ -299,10 +310,14 @@ class Agent:
             csv_bytes = submission_path.read_bytes()
             b64_out = base64.b64encode(csv_bytes).decode("ascii")
 
+            # Format scores as numbers (Arena regex requires numeric values)
+            def _fmt(v):
+                return f"{v:.6f}" if v is not None else "-1"
+
             summary = (
                 f"ReAct solver complete: "
-                f"best_score={best_score}, "
-                f"react_cv={react_score}, "
+                f"best_score={_fmt(best_score)}, "
+                f"react_cv={_fmt(react_score)}, "
                 f"strategy={strategy_name}"
             )
 
