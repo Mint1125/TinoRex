@@ -35,7 +35,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 SOLVER_URL = os.environ.get("SOLVER_URL", "http://127.0.0.1:8001/")
-STRATEGIES = os.environ.get("STRATEGIES", "balanced,explore_heavy,refine_heavy").split(",")
+STRATEGIES = os.environ.get("STRATEGIES", "quick_baseline,data_first,big_model").split(",")
 MAX_CONCURRENT_SOLVERS = int(os.environ.get("MAX_CONCURRENT_SOLVERS", "2"))
 
 

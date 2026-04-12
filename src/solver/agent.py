@@ -1,11 +1,11 @@
-"""v9 Hybrid Solver: Deterministic Baseline + Toolkit-Augmented Tree Search + Refinement.
+"""v9 Hybrid Solver: Baseline safety net + LLM tree search + refinement.
 
-5-phase pipeline:
-  Phase 1: Data profiling (automated, no LLM)
-  Phase 2: Deterministic baseline (stacking ensemble, no LLM)
-  Phase 3: LLM tree search (improves FROM baseline, not from scratch)
-  Phase 4: Persistent session refinement (incremental improvements)
-  Phase 5: Final ensemble (blend baseline + tree search best)
+Pipeline:
+  Phase 1: Data profiling (automated)
+  Phase 2: Baseline (deterministic, parallel safety net)
+  Phase 3: LLM tree search (writes from scratch, NOT from baseline)
+           + persistent session refinement (integrated into tree search)
+  Final:   Pick best by CV score between baseline and tree search
 """
 
 from __future__ import annotations
@@ -15,12 +15,12 @@ import io
 import json
 import logging
 import os
+import re
 import shutil
 import tarfile
 import tempfile
 from pathlib import Path
 
-import pandas as pd
 from a2a.server.tasks import TaskUpdater
 from a2a.types import FilePart, FileWithBytes, Message, Part, TaskState, TextPart
 from a2a.utils import get_message_text, new_agent_text_message
@@ -30,7 +30,6 @@ from interpreter import Interpreter
 from llm import LLMClient
 from ml_helpers import patch_submission_columns, validate_submission_report
 from profiler import run_profiler
-from refiner import refine
 from strategies import DEFAULT_STRATEGY, get_strategy
 from tree import SolutionTree
 
@@ -40,7 +39,9 @@ logger = logging.getLogger(__name__)
 _API_KEY_FILE = Path(r"C:/Users/PC4/OneDrive/바탕 화면/개인/개인정보/api_key.txt")
 
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "o4-mini")
+MAX_ITERATIONS = int(os.environ.get("MAX_ITERATIONS", "15"))
 CODE_TIMEOUT = int(os.environ.get("CODE_TIMEOUT", "600"))
+REFINE_STEPS = int(os.environ.get("REFINE_STEPS", "5"))
 
 
 def _load_api_keys() -> dict[str, str]:
@@ -108,75 +109,14 @@ def _parse_strategy(message: Message) -> str:
     return DEFAULT_STRATEGY
 
 
-def _blend_submissions(
-    baseline_path: Path,
-    treesearch_path: Path,
-    output_path: Path,
-    workdir: Path,
-    baseline_weight: float = 0.4,
-) -> None:
-    """Blend two submission CSVs by weighted average (numeric) or majority vote (labels)."""
-    try:
-        if not baseline_path.exists() or not treesearch_path.exists():
-            # If one doesn't exist, use the other
-            src = baseline_path if baseline_path.exists() else treesearch_path
-            if src.exists():
-                shutil.copy2(src, output_path)
-            return
-
-        base_df = pd.read_csv(baseline_path)
-        tree_df = pd.read_csv(treesearch_path)
-
-        if list(base_df.columns) != list(tree_df.columns):
-            logger.warning("Blend: column mismatch, using tree search result")
-            shutil.copy2(treesearch_path, output_path)
-            return
-
-        if len(base_df) != len(tree_df):
-            logger.warning("Blend: row count mismatch, using tree search result")
-            shutil.copy2(treesearch_path, output_path)
-            return
-
-        # Find sample submission to detect ID column
-        data_dir = workdir / "home" / "data"
-        sample_paths = sorted(data_dir.glob("sample_submission*.csv"))
-        id_cols = set()
-        if sample_paths:
-            sample = pd.read_csv(sample_paths[0])
-            # ID column: in both sample and test, unique values
-            for col in sample.columns:
-                if col.lower() in ("id", "index", "row_id") or sample[col].nunique() == len(sample):
-                    id_cols.add(col)
-
-        result = base_df.copy()
-        tree_weight = 1.0 - baseline_weight
-
-        for col in base_df.columns:
-            if col in id_cols:
-                continue
-
-            if pd.api.types.is_numeric_dtype(base_df[col]) and pd.api.types.is_numeric_dtype(tree_df[col]):
-                result[col] = baseline_weight * base_df[col] + tree_weight * tree_df[col]
-            else:
-                # For non-numeric: use tree search result (it's usually better)
-                result[col] = tree_df[col]
-
-        # Fill NaN
-        for col in result.columns:
-            if result[col].isna().any():
-                if col in base_df.columns:
-                    result[col] = result[col].fillna(base_df[col])
-                result[col] = result[col].fillna(0)
-
-        result.to_csv(output_path, index=False)
-        logger.info("Blended submission: baseline_w=%.2f, tree_w=%.2f", baseline_weight, tree_weight)
-
-    except Exception as exc:
-        logger.warning("Blend failed: %s, using tree search result", exc)
-        if treesearch_path.exists():
-            shutil.copy2(treesearch_path, output_path)
-        elif baseline_path.exists():
-            shutil.copy2(baseline_path, output_path)
+def _parse_cv_score(stdout: str) -> float | None:
+    matches = re.findall(r"CV_SCORE\s*=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)", stdout)
+    if matches:
+        try:
+            return float(matches[-1])
+        except ValueError:
+            pass
+    return None
 
 
 class Agent:
@@ -197,7 +137,7 @@ class Agent:
             return
 
         strategy_name = _parse_strategy(message)
-        strategy = get_strategy(strategy_name)
+        strategy_text = get_strategy(strategy_name)
 
         api_key = _load_api_key()
         if not api_key:
@@ -210,7 +150,8 @@ class Agent:
         await updater.update_status(
             TaskState.working,
             new_agent_text_message(
-                f"v9 Hybrid Solver starting (strategy={strategy.name}, model={OPENAI_MODEL})"
+                f"v9 Solver starting (strategy={strategy_name}, model={OPENAI_MODEL}, "
+                f"iterations={MAX_ITERATIONS})"
             ),
         )
 
@@ -246,11 +187,11 @@ class Agent:
                 data_profile = ""
 
             # =================================================================
-            # PHASE 2: Deterministic Baseline
+            # PHASE 2: Deterministic Baseline (safety net)
             # =================================================================
             await updater.update_status(
                 TaskState.working,
-                new_agent_text_message("Phase 2: Running deterministic baseline..."),
+                new_agent_text_message("Phase 2: Running deterministic baseline (safety net)..."),
             )
 
             baseline_code = get_baseline_script()
@@ -265,14 +206,7 @@ class Agent:
                     interp.cleanup()
 
                 if result.succeeded:
-                    import re
-                    matches = re.findall(
-                        r"CV_SCORE\s*=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)",
-                        result.stdout,
-                    )
-                    if matches:
-                        baseline_score = float(matches[-1])
-
+                    baseline_score = _parse_cv_score(result.stdout)
                     if submission_path.exists():
                         patch_submission_columns(submission_path, workdir)
                         shutil.copy2(submission_path, baseline_submission)
@@ -281,25 +215,23 @@ class Agent:
                         logger.warning("Phase 2: no submission.csv produced")
                 else:
                     logger.warning("Phase 2 failed: %s", result.exc_type)
-                    logger.warning("Baseline stderr: %s", result.stdout[-2000:] if result.stdout else "")
-
             except Exception as exc:
                 logger.warning("Phase 2 error: %s", exc)
 
             await updater.update_status(
                 TaskState.working,
-                new_agent_text_message(
-                    f"Phase 2 complete: baseline_score={baseline_score}"
-                ),
+                new_agent_text_message(f"Phase 2 done: baseline_score={baseline_score}"),
             )
 
             # =================================================================
-            # PHASE 3: LLM Tree Search (improving FROM baseline)
+            # PHASE 3: LLM Tree Search (from scratch, NOT from baseline)
+            #          + integrated persistent refinement
             # =================================================================
             await updater.update_status(
                 TaskState.working,
                 new_agent_text_message(
-                    f"Phase 3: LLM tree search ({strategy.max_iterations} iterations)..."
+                    f"Phase 3: LLM tree search ({MAX_ITERATIONS} iterations + "
+                    f"{REFINE_STEPS} refine steps)..."
                 ),
             )
 
@@ -307,8 +239,10 @@ class Agent:
             tree = SolutionTree(
                 workdir=workdir,
                 llm=llm,
-                max_iterations=strategy.max_iterations,
+                max_iterations=MAX_ITERATIONS,
                 code_timeout=CODE_TIMEOUT,
+                strategy_name=strategy_name,
+                refine_steps=REFINE_STEPS,
             )
 
             def on_node_complete(node):
@@ -317,8 +251,9 @@ class Agent:
                         updater.update_status(
                             TaskState.working,
                             new_agent_text_message(
-                                f"Phase 3 Node {node.node_id}: "
-                                f"cv={node.cv_score} err={node.error} "
+                                f"Node {node.node_id}: "
+                                f"cv_score={node.cv_score} "
+                                f"error={node.error} "
                                 f"time={node.exec_time:.0f}s"
                             ),
                         ),
@@ -331,7 +266,7 @@ class Agent:
                 tree_result = await loop.run_in_executor(
                     None,
                     lambda: tree.run(
-                        baseline_code=baseline_code,
+                        strategy=strategy_text,
                         data_profile=data_profile,
                         on_node_complete=on_node_complete,
                     ),
@@ -343,124 +278,60 @@ class Agent:
                 tree_result = None
                 tree_score = None
 
-            # Save tree search submission
+            # =================================================================
+            # FINAL: Pick best submission by CV score
+            # =================================================================
+            # Tree search result is current submission.csv
             tree_submission = workdir / "_tree_submission.csv"
             if submission_path.exists():
                 shutil.copy2(submission_path, tree_submission)
 
-            await updater.update_status(
-                TaskState.working,
-                new_agent_text_message(
-                    f"Phase 3 complete: tree_score={tree_score} "
-                    f"({len(tree_result.all_nodes) if tree_result else 0} nodes)"
-                ),
-            )
+            # Decide: use tree search or baseline?
+            use_baseline = False
+            if tree_score is not None and baseline_score is not None:
+                use_baseline = baseline_score > tree_score
+            elif tree_score is None and baseline_score is not None:
+                use_baseline = True
 
-            # =================================================================
-            # PHASE 4: Persistent Session Refinement
-            # =================================================================
-            best_code = None
-            if tree_result and tree_result.best_node and tree_result.best_node.code:
-                best_code = tree_result.best_node.code
-            elif baseline_code:
-                best_code = baseline_code
+            if use_baseline and baseline_submission.exists():
+                logger.info("Using baseline (score=%s > tree=%s)", baseline_score, tree_score)
+                shutil.copy2(baseline_submission, submission_path)
+            elif tree_submission.exists():
+                shutil.copy2(tree_submission, submission_path)
+            elif baseline_submission.exists():
+                shutil.copy2(baseline_submission, submission_path)
 
-            refine_score = None
-            if best_code and strategy.refine_steps > 0:
-                await updater.update_status(
-                    TaskState.working,
-                    new_agent_text_message(
-                        f"Phase 4: Refinement ({strategy.refine_steps} steps)..."
-                    ),
-                )
-                try:
-                    refine_score, improved = await loop.run_in_executor(
-                        None,
-                        lambda: refine(
-                            workdir=workdir,
-                            best_code=best_code,
-                            llm=llm,
-                            data_profile=data_profile,
-                            max_steps=strategy.refine_steps,
-                            timeout_per_step=CODE_TIMEOUT,
-                        ),
-                    )
-                    logger.info("Phase 4 complete: refine_score=%s improved=%s", refine_score, improved)
-                except Exception as exc:
-                    logger.warning("Phase 4 failed: %s", exc)
+            # Final validation
+            if submission_path.exists():
+                patch_submission_columns(submission_path, workdir)
 
-            # =================================================================
-            # PHASE 5: Final Ensemble
-            # =================================================================
-            await updater.update_status(
-                TaskState.working,
-                new_agent_text_message("Phase 5: Final ensemble..."),
-            )
-
-            # Determine which submission to use or blend
-            final_submission = submission_path
-
-            if baseline_submission.exists() and tree_submission.exists():
-                # Both exist: blend them
-                _blend_submissions(
-                    baseline_path=baseline_submission,
-                    treesearch_path=tree_submission if not submission_path.exists() else submission_path,
-                    output_path=final_submission,
-                    workdir=workdir,
-                    baseline_weight=0.3,  # Tree search usually better
-                )
-            elif not submission_path.exists():
-                # Use whatever exists
-                if tree_submission.exists():
-                    shutil.copy2(tree_submission, final_submission)
-                elif baseline_submission.exists():
-                    shutil.copy2(baseline_submission, final_submission)
-
-            # Final validation and patching
-            if final_submission.exists():
-                patch_submission_columns(final_submission, workdir)
-                validation = validate_submission_report(final_submission, workdir)
-                if not validation["valid"]:
-                    logger.warning("Final validation issues: %s", validation["summary"])
-                    # Fallback to best individual submission
-                    if tree_submission.exists():
-                        shutil.copy2(tree_submission, final_submission)
-                        patch_submission_columns(final_submission, workdir)
-                    elif baseline_submission.exists():
-                        shutil.copy2(baseline_submission, final_submission)
-                        patch_submission_columns(final_submission, workdir)
-
-            if not final_submission.exists():
-                # Last resort: copy sample submission
+            if not submission_path.exists():
+                # Last resort: sample submission
                 data_dir = workdir / "home" / "data"
                 sample_paths = list(data_dir.glob("sample_submission*.csv"))
                 if sample_paths:
-                    shutil.copy2(sample_paths[0], final_submission)
+                    shutil.copy2(sample_paths[0], submission_path)
                     logger.warning("Using sample_submission as fallback")
 
-            if not final_submission.exists():
+            if not submission_path.exists():
                 await updater.add_artifact(
                     parts=[Part(root=TextPart(text="Error: no submission.csv produced"))],
                     name="Error",
                 )
                 return
 
-            # Build summary
-            best_score = max(
-                filter(None, [baseline_score, tree_score, refine_score]),
-                default=None,
-            )
-
-            csv_bytes = final_submission.read_bytes()
+            best_score = max(filter(None, [baseline_score, tree_score]), default=None)
+            csv_bytes = submission_path.read_bytes()
             b64_out = base64.b64encode(csv_bytes).decode("ascii")
 
             summary = (
-                f"v9 Hybrid complete: "
-                f"baseline={baseline_score}, "
-                f"tree={tree_score} ({len(tree_result.all_nodes) if tree_result else 0} nodes), "
-                f"refine={refine_score}, "
+                f"Tree search complete: "
+                f"{len(tree_result.all_nodes) if tree_result else 0} nodes, "
                 f"best_score={best_score}, "
-                f"strategy={strategy.name}"
+                f"tree={tree_score}, baseline={baseline_score}, "
+                f"used={'baseline' if use_baseline else 'tree'}, "
+                f"total_time={tree_result.total_time:.0f}s, "
+                f"strategy={strategy_name}"
             )
 
             await updater.add_artifact(

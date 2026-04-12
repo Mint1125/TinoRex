@@ -1,49 +1,66 @@
-"""Strategy configuration for v9 hybrid solver.
+"""Strategy seeds for the v9 hybrid solver.
 
-Strategies control how the solver balances deterministic baseline
-vs. LLM tree search iterations.
+Each strategy provides a different initial approach hint that biases Node 0.
+The tree search then iterates from that starting point.  Using diverse seeds
+across parallel attempts is the structural equivalent of pass@k.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-
-@dataclass
-class Strategy:
-    name: str
-    description: str
-    max_iterations: int  # LLM tree search iterations after baseline
-    refine_steps: int    # persistent session refinement steps
-
-
-STRATEGIES: dict[str, Strategy] = {
-    "balanced": Strategy(
-        name="balanced",
-        description="Balanced: baseline + moderate tree search + refinement",
-        max_iterations=10,
-        refine_steps=5,
+STRATEGIES: dict[str, str] = {
+    # -- Fast baseline --------------------------------------------------------
+    "quick_baseline": (
+        "Start with the SIMPLEST possible approach.  "
+        "Read the data, do minimal preprocessing (drop NaNs, label-encode "
+        "categoricals), train a single LightGBM or LogisticRegression model "
+        "with default hyperparameters, and produce submission.csv as fast as "
+        "possible.  Prioritize getting a VALID submission before any "
+        "optimization."
     ),
-    "explore_heavy": Strategy(
-        name="explore_heavy",
-        description="Heavy exploration: baseline + many tree search iterations",
-        max_iterations=15,
-        refine_steps=3,
+
+    # -- Data-first / deep EDA ------------------------------------------------
+    "data_first": (
+        "Before modeling, spend time understanding the data deeply.  "
+        "Print column types, missing rates, class balance, value ranges, "
+        "and correlations.  Identify the most promising features and any "
+        "data quality issues.  Then build a model that specifically "
+        "addresses what you found (e.g. handle class imbalance, engineer "
+        "domain-specific features, pick an appropriate model family)."
     ),
-    "refine_heavy": Strategy(
-        name="refine_heavy",
-        description="Heavy refinement: baseline + few tree search + deep refinement",
-        max_iterations=6,
-        refine_steps=8,
+
+    # -- Heavy model / deep learning ------------------------------------------
+    "big_model": (
+        "Consider whether this competition benefits from a deep learning "
+        "approach.  If the data contains images, text, sequences, or signals, "
+        "use PyTorch / torchvision / transformers / torchaudio.  If the data "
+        "is tabular, use a strong gradient boosting model (XGBoost or "
+        "CatBoost) with careful feature engineering.  Allocate more compute "
+        "toward model training rather than quick prototyping."
+    ),
+
+    # -- Ensemble / stacking --------------------------------------------------
+    "ensemble_focus": (
+        "Build multiple diverse models (e.g. LightGBM, XGBoost, CatBoost, "
+        "RandomForest, LogisticRegression) and blend or stack their predictions.  "
+        "Use out-of-fold predictions for stacking to avoid leakage.  Focus on "
+        "model diversity over individual model tuning -- ensembles of different "
+        "algorithms outperform tuning a single one."
+    ),
+
+    # -- Feature engineering heavy --------------------------------------------
+    "feature_heavy": (
+        "Invest most effort in feature engineering before modeling.  Create "
+        "interaction features, polynomial features, aggregations, frequency "
+        "encodings, target encodings (with proper CV folds to avoid leakage), "
+        "and domain-specific transformations.  Use a simple model (LightGBM "
+        "with defaults) to let the features do the heavy lifting."
     ),
 }
 
-DEFAULT_STRATEGY = "balanced"
+DEFAULT_STRATEGY = "quick_baseline"
 
-
-def get_strategy(name: str) -> Strategy:
+def get_strategy(name: str) -> str:
     return STRATEGIES.get(name, STRATEGIES[DEFAULT_STRATEGY])
-
 
 def all_strategy_names() -> list[str]:
     return list(STRATEGIES.keys())
