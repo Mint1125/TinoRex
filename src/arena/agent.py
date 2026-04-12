@@ -34,7 +34,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 SOLVER_URL = os.environ.get("SOLVER_URL", "http://127.0.0.1:8001/")
-STRATEGIES = os.environ.get("STRATEGIES", "quick_baseline,data_first,big_model").split(",")
+STRATEGIES = os.environ.get("STRATEGIES", "quick_baseline,data_first,big_model,ensemble_focus,feature_heavy").split(",")
 
 
 def _first_tar_from_message(message: Message) -> str | None:
