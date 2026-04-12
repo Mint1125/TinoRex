@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 _API_KEY_FILE = Path(r"C:/Users/PC4/OneDrive/바탕 화면/개인/개인정보/api_key.txt")
 
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "o4-mini")
-MAX_ITERATIONS = int(os.environ.get("MAX_ITERATIONS", "20"))
+MAX_ITERATIONS = int(os.environ.get("MAX_ITERATIONS", "12"))
 CODE_TIMEOUT = int(os.environ.get("CODE_TIMEOUT", "600"))
 REFINE_STEPS = int(os.environ.get("REFINE_STEPS", "8"))
 
