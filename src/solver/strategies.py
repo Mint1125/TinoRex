@@ -1,14 +1,14 @@
-"""Strategy seeds for the v9 hybrid solver.
+"""Strategy seeds for the tree search solver.
 
-Each strategy provides a different initial approach hint that biases Node 0.
-The tree search then iterates from that starting point.  Using diverse seeds
-across parallel attempts is the structural equivalent of pass@k.
+Each strategy provides a different initial approach hint that biases the first
+solution node.  The tree search then iterates from that starting point.  Using
+diverse seeds across parallel attempts is the structural equivalent of pass@k.
 """
 
 from __future__ import annotations
 
 STRATEGIES: dict[str, str] = {
-    # -- Fast baseline --------------------------------------------------------
+    # ── Fast baseline ────────────────────────────────────────────────────
     "quick_baseline": (
         "Start with the SIMPLEST possible approach.  "
         "Read the data, do minimal preprocessing (drop NaNs, label-encode "
@@ -18,7 +18,7 @@ STRATEGIES: dict[str, str] = {
         "optimization."
     ),
 
-    # -- Data-first / deep EDA ------------------------------------------------
+    # ── Data-first / deep EDA ───────��────────────────────────────────────
     "data_first": (
         "Before modeling, spend time understanding the data deeply.  "
         "Print column types, missing rates, class balance, value ranges, "
@@ -28,7 +28,7 @@ STRATEGIES: dict[str, str] = {
         "domain-specific features, pick an appropriate model family)."
     ),
 
-    # -- Heavy model / deep learning ------------------------------------------
+    # ── Heavy model / deep learning ───────���──────────────────────────────
     "big_model": (
         "Consider whether this competition benefits from a deep learning "
         "approach.  If the data contains images, text, sequences, or signals, "
@@ -36,24 +36,6 @@ STRATEGIES: dict[str, str] = {
         "is tabular, use a strong gradient boosting model (XGBoost or "
         "CatBoost) with careful feature engineering.  Allocate more compute "
         "toward model training rather than quick prototyping."
-    ),
-
-    # -- Ensemble / stacking --------------------------------------------------
-    "ensemble_focus": (
-        "Build multiple diverse models (e.g. LightGBM, XGBoost, CatBoost, "
-        "RandomForest, LogisticRegression) and blend or stack their predictions.  "
-        "Use out-of-fold predictions for stacking to avoid leakage.  Focus on "
-        "model diversity over individual model tuning -- ensembles of different "
-        "algorithms outperform tuning a single one."
-    ),
-
-    # -- Feature engineering heavy --------------------------------------------
-    "feature_heavy": (
-        "Invest most effort in feature engineering before modeling.  Create "
-        "interaction features, polynomial features, aggregations, frequency "
-        "encodings, target encodings (with proper CV folds to avoid leakage), "
-        "and domain-specific transformations.  Use a simple model (LightGBM "
-        "with defaults) to let the features do the heavy lifting."
     ),
 }
 

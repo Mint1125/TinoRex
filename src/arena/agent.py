@@ -1,11 +1,8 @@
-"""Arena v10: Explore → Select → Refine pipeline.
+"""Arena agent: dispatches competition to solver with multiple strategies, picks best result.
 
-The arena is the brain. It orchestrates:
-  Phase 1 (Exploration): Fan out N short solver runs with diverse hints
-  Phase 2 (Selection):   Pick the best by CV score
-  Phase 3 (Refinement):  Deep optimization on the winner's strategy
-
-The solver is the muscle — it just runs a ReAct agent with the given config.
+The arena is the entry point that the evaluator talks to.  It receives the
+competition tar.gz, fans out to the solver agent with different strategy seeds
+(structural pass@k), collects all submissions, and returns the single best one.
 """
 
 from __future__ import annotations
@@ -15,7 +12,6 @@ import base64
 import json
 import logging
 import os
-import re
 from uuid import uuid4
 
 import httpx
@@ -38,31 +34,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 SOLVER_URL = os.environ.get("SOLVER_URL", "http://127.0.0.1:8001/")
-
-# Pipeline configuration
-EXPLORATION_BRANCHES = int(os.environ.get("EXPLORATION_BRANCHES", "3"))
-EXPLORATION_STEPS = int(os.environ.get("EXPLORATION_STEPS", "10"))
-REFINEMENT_STEPS = int(os.environ.get("REFINEMENT_STEPS", "20"))
-MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT_SOLVERS", "2"))
-
-# Diverse exploration hints (structural pass@k)
-EXPLORATION_HINTS = [
-    (
-        "quick_baseline",
-        "Start with the SIMPLEST robust baseline: minimal preprocessing, one strong "
-        "default model (e.g. LogisticRegression or GradientBoosting), valid submission first.",
-    ),
-    (
-        "data_first",
-        "Prioritize EDA: inspect missing values, target balance, feature types; then "
-        "model in a way that directly addresses what you found.",
-    ),
-    (
-        "big_model",
-        "Prioritize model capacity: stronger boosting (XGBoost/LightGBM with tuned "
-        "hyperparameters) or careful feature interactions after a quick baseline check.",
-    ),
-]
+STRATEGIES = os.environ.get("STRATEGIES", "quick_baseline,data_first,big_model").split(",")
 
 
 def _first_tar_from_message(message: Message) -> str | None:
@@ -79,14 +51,13 @@ def _first_tar_from_message(message: Message) -> str | None:
     return None
 
 
-async def _call_solver(
+async def _run_solver(
     solver_url: str,
-    tar_b64: str,
     strategy: str,
-    max_iterations: int,
-    extra_instructions: str = "",
+    instructions_text: str,
+    tar_b64: str,
 ) -> dict | None:
-    """Call solver with specific config. Returns {strategy, csv_b64, summary, cv_score} or None."""
+    """Send a competition to the solver with a specific strategy. Returns submission info or None."""
     try:
         async with httpx.AsyncClient(timeout=7200) as hc:
             resolver = A2ACardResolver(httpx_client=hc, base_url=solver_url)
@@ -95,11 +66,7 @@ async def _call_solver(
             factory = ClientFactory(config)
             client = factory.create(agent_card)
 
-            payload = json.dumps({
-                "strategy": strategy,
-                "max_iterations": max_iterations,
-                "extra_instructions": extra_instructions,
-            })
+            payload = json.dumps({"strategy": strategy})
             msg = Message(
                 kind="message",
                 role=Role.user,
@@ -138,32 +105,27 @@ async def _call_solver(
                         pass
 
             if submission_csv_b64:
-                cv_score = _extract_cv_score(summary_text)
                 return {
                     "strategy": strategy,
                     "csv_b64": submission_csv_b64,
                     "summary": summary_text,
-                    "cv_score": cv_score,
                 }
             return None
 
     except Exception as exc:
-        logger.error("Solver call failed (strategy=%s): %s", strategy, exc)
+        logger.error("Solver attempt (strategy=%s) failed: %s", strategy, exc)
         return None
 
 
 def _extract_cv_score(summary: str) -> float:
-    """Parse best_score or react_cv from solver summary."""
-    for pattern in [
-        r"best_score=([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)",
-        r"react_cv=([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)",
-    ]:
-        match = re.search(pattern, summary)
-        if match:
-            try:
-                return float(match.group(1))
-            except ValueError:
-                pass
+    """Parse best_score from the solver summary text."""
+    import re
+    match = re.search(r"best_score=([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)", summary)
+    if match:
+        try:
+            return float(match.group(1))
+        except ValueError:
+            pass
     return -1e9
 
 
@@ -184,131 +146,45 @@ class Agent:
             )
             return
 
-        n_branches = min(EXPLORATION_BRANCHES, len(EXPLORATION_HINTS))
+        instructions_text = get_message_text(message)
 
         await updater.update_status(
             TaskState.working,
             new_agent_text_message(
-                f"Arena pipeline: {n_branches} exploration branches × {EXPLORATION_STEPS} steps, "
-                f"then {REFINEMENT_STEPS} refinement steps"
+                f"Arena: launching {len(STRATEGIES)} solver attempts "
+                f"(strategies: {STRATEGIES})"
             ),
         )
 
-        # =================================================================
-        # PHASE 1: EXPLORATION — diverse short runs
-        # =================================================================
-        await updater.update_status(
-            TaskState.working,
-            new_agent_text_message(
-                f"Phase 1: Exploration ({n_branches} branches, {EXPLORATION_STEPS} steps each)..."
-            ),
-        )
+        # Fan out to solver with different strategies in parallel
+        tasks = [
+            _run_solver(SOLVER_URL, strategy, instructions_text, tar_b64)
+            for strategy in STRATEGIES
+        ]
+        results = await asyncio.gather(*tasks)
 
-        semaphore = asyncio.Semaphore(MAX_CONCURRENT)
-
-        async def _explore(idx: int) -> dict | None:
-            name, hint = EXPLORATION_HINTS[idx % len(EXPLORATION_HINTS)]
-            async with semaphore:
-                await updater.update_status(
-                    TaskState.working,
-                    new_agent_text_message(f"Exploration {idx+1}/{n_branches}: {name}"),
-                )
-                return await _call_solver(
-                    SOLVER_URL, tar_b64,
-                    strategy=name,
-                    max_iterations=EXPLORATION_STEPS,
-                )
-
-        explore_tasks = [_explore(i) for i in range(n_branches)]
-        explore_results = await asyncio.gather(*explore_tasks)
-
-        # =================================================================
-        # PHASE 2: SELECTION — pick best exploration
-        # =================================================================
-        successful = [r for r in explore_results if r is not None]
+        # Collect successful results
+        successful = [r for r in results if r is not None]
         logger.info(
-            "Exploration: %d/%d succeeded", len(successful), n_branches
+            "Arena: %d/%d attempts succeeded", len(successful), len(STRATEGIES)
         )
 
         if not successful:
             await updater.add_artifact(
-                parts=[Part(root=TextPart(text="Error: all exploration branches failed"))],
+                parts=[Part(root=TextPart(text="Error: all solver attempts failed"))],
                 name="Error",
             )
             return
 
-        winner = max(successful, key=lambda r: r["cv_score"])
-        winner_strategy = winner["strategy"]
-        winner_cv = winner["cv_score"]
-        cv_display = f"{winner_cv:.4f}" if winner_cv > -1e8 else "unknown"
-
-        all_scores = ", ".join(
-            f"{r['strategy']}={r['cv_score']:.4f}" if r['cv_score'] > -1e8
-            else f"{r['strategy']}=N/A"
-            for r in successful
-        )
+        # Pick the best by CV score
+        best = max(successful, key=lambda r: _extract_cv_score(r["summary"]))
 
         await updater.update_status(
             TaskState.working,
             new_agent_text_message(
-                f"Phase 2: Selected '{winner_strategy}' (CV≈{cv_display}). "
-                f"All scores: [{all_scores}]"
-            ),
-        )
-
-        # =================================================================
-        # PHASE 3: REFINEMENT — deep optimization on winner's strategy
-        # =================================================================
-        await updater.update_status(
-            TaskState.working,
-            new_agent_text_message(
-                f"Phase 3: Refinement ({REFINEMENT_STEPS} steps) on '{winner_strategy}'..."
-            ),
-        )
-
-        refine_extra = (
-            f"[Refinement phase] The best exploration branch used strategy '{winner_strategy}' "
-            f"and achieved approx CV_SCORE={cv_display}. "
-            f"Build on this approach and improve: try ensembling, hyperparameter tuning, "
-            f"better feature engineering, or calibration. "
-            f"Try to beat {cv_display}!"
-        )
-
-        refine_result = await _call_solver(
-            SOLVER_URL, tar_b64,
-            strategy=winner_strategy,
-            max_iterations=REFINEMENT_STEPS,
-            extra_instructions=refine_extra,
-        )
-
-        # =================================================================
-        # FINAL: Pick best between exploration winner and refinement
-        # =================================================================
-        best = winner  # default to exploration winner
-
-        if refine_result is not None:
-            refine_cv = refine_result["cv_score"]
-            logger.info(
-                "Refinement: cv=%s (exploration winner was %s)",
-                refine_cv, winner_cv,
-            )
-            if refine_cv > winner_cv:
-                best = refine_result
-                logger.info("Refinement improved: %s → %s", winner_cv, refine_cv)
-            else:
-                logger.info("Refinement did not improve, keeping exploration winner")
-        else:
-            logger.warning("Refinement failed, keeping exploration winner")
-
-        final_cv = best["cv_score"]
-        final_strategy = best["strategy"]
-        is_refined = best is refine_result
-
-        await updater.update_status(
-            TaskState.working,
-            new_agent_text_message(
-                f"Final: strategy={final_strategy}, cv={final_cv:.4f}, "
-                f"refined={'yes' if is_refined else 'no'}"
+                f"Arena: best strategy={best['strategy']} "
+                f"(score={_extract_cv_score(best['summary'])}), "
+                f"{len(successful)}/{len(STRATEGIES)} succeeded"
             ),
         )
 
@@ -327,7 +203,4 @@ class Agent:
             name="submission",
         )
         self._done_contexts.add(ctx)
-        logger.info(
-            "Arena submitted: strategy=%s cv=%s refined=%s scores=[%s]",
-            final_strategy, final_cv, is_refined, all_scores,
-        )
+        logger.info("Arena: submitted best result (strategy=%s)", best["strategy"])

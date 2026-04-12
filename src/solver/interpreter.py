@@ -1,13 +1,13 @@
-"""Execute Python scripts in isolated subprocess -- Windows-safe."""
+"""Execute Python scripts in isolated subprocess — Windows-safe."""
 
 from __future__ import annotations
 
 import logging
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
@@ -27,36 +27,14 @@ class ExecutionResult:
         return self.exc_type is None
 
 
-def _classify_error(returncode: int, stderr: str) -> str:
-    """Classify error type from return code and stderr for better LLM feedback."""
-    stderr_lower = stderr.lower()
-    if "modulenotfounderror" in stderr_lower or "no module named" in stderr_lower:
-        return "ImportError"
-    if "memoryerror" in stderr_lower or "killed" in stderr_lower:
-        return "MemoryError"
-    if "syntaxerror" in stderr_lower:
-        return "SyntaxError"
-    if "keyerror" in stderr_lower:
-        return "KeyError"
-    if "filenotfounderror" in stderr_lower:
-        return "FileNotFoundError"
-    if "valueerror" in stderr_lower:
-        return "ValueError"
-    if "typeerror" in stderr_lower:
-        return "TypeError"
-    if "indexerror" in stderr_lower:
-        return "IndexError"
-    return "RuntimeError"
-
-
 class Interpreter:
     def __init__(self, workdir: str | Path, timeout: int = 600):
         self.working_dir = str(Path(workdir).resolve())
         self.timeout = timeout
 
     def run(self, code: str) -> ExecutionResult:
-        """Execute code in a fresh subprocess. Uses unique filename to avoid race conditions."""
-        script = Path(self.working_dir) / f"_solver_run_{uuid4().hex[:8]}.py"
+        """Execute code in a fresh subprocess.  Windows-safe."""
+        script = Path(self.working_dir) / "_solver_run.py"
         try:
             script.write_text(code, encoding="utf-8")
         except Exception as exc:
@@ -81,20 +59,13 @@ class Interpreter:
             stdout = proc.stdout
             if proc.stderr:
                 stdout += "\n--- stderr ---\n" + proc.stderr
-
-            if proc.returncode == 0:
-                return ExecutionResult(stdout=stdout, exec_time=exec_time, exc_type=None)
-
-            exc_type = _classify_error(proc.returncode, proc.stderr)
+            exc_type = None if proc.returncode == 0 else "RuntimeError"
             return ExecutionResult(stdout=stdout, exec_time=exec_time, exc_type=exc_type)
 
-        except subprocess.TimeoutExpired as e:
+        except subprocess.TimeoutExpired:
             exec_time = time.time() - start
-            partial = ""
-            if e.stdout:
-                partial = e.stdout if isinstance(e.stdout, str) else e.stdout.decode("utf-8", errors="replace")
             return ExecutionResult(
-                stdout=f"{partial}\nTimeoutError: execution exceeded {self.timeout}s time limit",
+                stdout=f"TimeoutError: exceeded {self.timeout}s limit",
                 exec_time=exec_time,
                 exc_type="TimeoutError",
             )

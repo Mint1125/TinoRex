@@ -21,22 +21,22 @@ def main():
     args = parser.parse_args()
 
     skill = AgentSkill(
-        id="react_solver",
-        name="ReAct ML Solver v10",
+        id="tree_search_solver",
+        name="Tree Search ML Solver",
         description=(
-            "ReAct solver: LLM interacts with data via persistent Python session "
-            "using run_python + validate_submission tools. Baseline safety net. "
-            "Receives competition tar.gz + strategy, returns best submission.csv."
+            "AIDE-style tree search solver.  Receives a competition tar.gz + strategy seed, "
+            "iteratively generates and improves complete Python solutions, returns the best "
+            "submission.csv."
         ),
-        tags=["solver", "react", "persistent-session", "mle-bench"],
+        tags=["solver", "tree-search", "mle-bench", "kaggle"],
         examples=[],
     )
 
     agent_card = AgentCard(
-        name="TinoRex Solver v10",
-        description="ReAct ML solver: persistent session + tool use + baseline safety net",
+        name="AgentX Solver",
+        description="Tree search ML competition solver",
         url=args.card_url or f"http://{args.host}:{args.port}/",
-        version="10.0.0",
+        version="1.0.0",
         default_input_modes=["text/plain"],
         default_output_modes=["text/plain"],
         capabilities=AgentCapabilities(streaming=True),
