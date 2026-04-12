@@ -5,13 +5,15 @@ The solver generates complete Python scripts at every node.  Each script must:
   2. Train a model and cross-validate, printing  CV_SCORE=<float>
   3. Predict on the test set and write ./submission.csv
 
-The tree iterates: select best node → ask LLM to improve → execute → score.
+The tree iterates: select best node -> ask LLM to improve -> execute -> score.
 """
 
 from __future__ import annotations
 
 import logging
+import random
 import re
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +21,7 @@ from typing import Any
 
 from interpreter import Interpreter
 from llm import LLMClient
+from ml_helpers import patch_submission_columns, validate_submission_report
 
 logger = logging.getLogger(__name__)
 
@@ -39,13 +42,21 @@ or RMSE for regression.
 sample_submission.csv exactly (same columns, same row count, same ID column).
 
 Rules:
-- The script must be COMPLETE — it will run in a fresh Python process.
+- The script must be COMPLETE -- it will run in a fresh Python process.
 - Include all imports at the top.
 - Print CV_SCORE=<float> exactly once.  This is how your solution is scored.
 - If you are unsure about the task type, inspect sample_submission.csv first.
 - Handle errors gracefully: catch exceptions during training and print diagnostics.
-- Keep stdout concise — only print what is needed to debug.
-- NEVER hardcode predictions or labels from memory — always train a real model.
+- Keep stdout concise -- only print what is needed to debug.
+- NEVER hardcode predictions or labels from memory -- always train a real model.
+- ALWAYS read sample_submission.csv first to check expected format, columns, and row count.
+- Before saving submission.csv, verify:
+  (a) columns match sample_submission.csv exactly (same names, same order)
+  (b) row count matches sample_submission.csv (or test.csv) exactly
+  (c) no NaN values in any column
+  (d) ID column values match sample_submission.csv
+- If you are unsure about prediction values, use safe defaults (mean of train \
+target for regression, mode for classification).
 """
 
 INITIAL_PROMPT = """\
@@ -78,9 +89,18 @@ Execution output (truncated):
 
 {error_context}
 
+{validation_feedback}
+
 Make ONE specific improvement to increase the CV score.  Return the COMPLETE \
 updated Python script.  Do not remove the CV_SCORE print.  Do not remove the \
 submission.csv save.
+
+CRITICAL submission requirements:
+- submission.csv MUST have the exact same columns as sample_submission.csv
+- submission.csv MUST have the exact same number of rows as sample_submission.csv
+- submission.csv MUST NOT contain any NaN or missing values
+- The ID column values must match sample_submission.csv exactly
+- Always read sample_submission.csv first to understand the expected format
 
 Focus on: {improvement_hint}
 """
@@ -96,6 +116,8 @@ IMPROVEMENT_HINTS = [
     "data cleaning (outlier removal, deduplication, type casting)",
 ]
 
+RECOVERY_ITERATIONS = 3
+
 
 @dataclass
 class SolutionNode:
@@ -107,6 +129,7 @@ class SolutionNode:
     error: str | None = None
     parent_id: int | None = None
     iteration: int = 0
+    validation_report: dict | None = None
 
 
 @dataclass
@@ -159,8 +182,8 @@ class SolutionTree:
                 return text
         return "<no description file found>"
 
-    def _execute(self, code: str) -> tuple[float | None, str, float, str | None]:
-        """Run code, return (cv_score, stdout, exec_time, error)."""
+    def _execute(self, code: str) -> tuple[float | None, str, float, str | None, dict]:
+        """Run code, return (cv_score, stdout, exec_time, error, validation_report)."""
         interp = Interpreter(workdir=self.workdir, timeout=self.code_timeout)
         try:
             result = interp.run(code)
@@ -178,11 +201,23 @@ class SolutionTree:
         cv_score = self._parse_cv_score(result.stdout)
 
         submission_path = self.workdir / "submission.csv"
-        if not submission_path.exists():
+        if submission_path.exists():
+            validation = validate_submission_report(submission_path, self.workdir)
+            # Auto-patch fixable issues
+            if not validation["valid"]:
+                patch_submission_columns(submission_path, self.workdir)
+                validation = validate_submission_report(submission_path, self.workdir)
+        else:
+            validation = {
+                "valid": False,
+                "errors": ["submission.csv not found"],
+                "warnings": [],
+                "summary": "FAIL: submission.csv was not produced.",
+            }
             if error is None:
                 error = "NoSubmission"
 
-        return cv_score, stdout, result.exec_time, error
+        return cv_score, stdout, result.exec_time, error, validation
 
     @staticmethod
     def _parse_cv_score(stdout: str) -> float | None:
@@ -194,24 +229,68 @@ class SolutionTree:
                 return None
         return None
 
-    def _select_parent(self) -> SolutionNode:
-        """Select the best-scoring node to branch from."""
+    def _select_parent(self, iteration: int) -> SolutionNode:
+        """Select parent with diversity: epsilon-greedy + lineage rotation."""
         valid = [n for n in self.nodes if n.cv_score is not None and n.error is None]
-        if valid:
-            return max(valid, key=lambda n: n.cv_score)
+        if not valid:
+            scored = [n for n in self.nodes if n.cv_score is not None]
+            if scored:
+                valid = scored
+            else:
+                return self.nodes[-1]
+
+        # Every 3rd iteration, pick a random node from top-50% to encourage exploration
+        if iteration % 3 == 0 and len(valid) >= 2:
+            sorted_nodes = sorted(valid, key=lambda n: n.cv_score, reverse=True)
+            top_half = sorted_nodes[:max(1, len(sorted_nodes) // 2)]
+            return random.choice(top_half)
+
+        best = max(valid, key=lambda n: n.cv_score)
+
+        # Avoid picking the same parent twice in a row
+        if len(valid) >= 2 and len(self.nodes) >= 2:
+            last_parent_id = self.nodes[-1].parent_id
+            if best.node_id == last_parent_id:
+                second_candidates = [n for n in valid if n.node_id != best.node_id]
+                if second_candidates:
+                    return max(second_candidates, key=lambda n: n.cv_score)
+
+        return best
+
+    def _best_node(self) -> SolutionNode | None:
+        """Return the best node that has a valid submission and a score."""
+        # Prefer nodes with valid submissions
+        valid_sub = [
+            n for n in self.nodes
+            if n.cv_score is not None
+            and n.validation_report is not None
+            and n.validation_report.get("valid", False)
+        ]
+        if valid_sub:
+            return max(valid_sub, key=lambda n: n.cv_score)
+
+        # Fallback: any node with a score
         scored = [n for n in self.nodes if n.cv_score is not None]
         if scored:
             return max(scored, key=lambda n: n.cv_score)
-        return self.nodes[-1]
 
-    def _best_node(self) -> SolutionNode | None:
-        """Return the best node that has a submission.csv and a score."""
-        valid = [n for n in self.nodes if n.cv_score is not None]
-        if not valid:
-            # Fallback: any node without an error
-            no_error = [n for n in self.nodes if n.error is None]
-            return no_error[-1] if no_error else (self.nodes[-1] if self.nodes else None)
-        return max(valid, key=lambda n: n.cv_score)
+        # Last resort: any node without an error
+        no_error = [n for n in self.nodes if n.error is None]
+        return no_error[-1] if no_error else (self.nodes[-1] if self.nodes else None)
+
+    def _build_validation_feedback(self, node: SolutionNode) -> str:
+        """Build validation feedback string for the IMPROVE_PROMPT."""
+        if node.validation_report is None:
+            return ""
+        report = node.validation_report
+        if not report.get("valid", True):
+            return (
+                "SUBMISSION VALIDATION ISSUES (fix these FIRST before improving the model):\n"
+                + report["summary"]
+            )
+        if report.get("warnings"):
+            return "Submission warnings:\n" + "\n".join(report["warnings"])
+        return "Submission validation: OK (all checks passed)."
 
     def run(
         self,
@@ -223,7 +302,7 @@ class SolutionTree:
         description = self._read_description()
         file_listing = self._list_files()
 
-        # ── Node 0: initial solution ─────────────────────────────────────
+        # -- Node 0: initial solution ----------------------------------------
         logger.info("Generating initial solution (strategy=%s)", strategy)
         user_prompt = INITIAL_PROMPT.format(
             description=description,
@@ -231,7 +310,7 @@ class SolutionTree:
             strategy=strategy,
         )
         code = self.llm.generate_code(system=SYSTEM_PROMPT, user=user_prompt)
-        cv_score, stdout, exec_time, error = self._execute(code)
+        cv_score, stdout, exec_time, error, validation = self._execute(code)
 
         node0 = SolutionNode(
             node_id=self._new_id(),
@@ -242,18 +321,20 @@ class SolutionTree:
             error=error,
             parent_id=None,
             iteration=0,
+            validation_report=validation,
         )
         self.nodes.append(node0)
         logger.info(
-            "Node %d: cv_score=%s error=%s exec_time=%.1fs",
-            node0.node_id, cv_score, error, exec_time,
+            "Node %d: cv_score=%s error=%s valid=%s exec_time=%.1fs",
+            node0.node_id, cv_score, error,
+            validation.get("valid"), exec_time,
         )
         if on_node_complete:
             on_node_complete(node0)
 
-        # ── Iteration loop ───────────────────────────────────────────────
+        # -- Iteration loop ---------------------------------------------------
         for iteration in range(1, self.max_iterations):
-            parent = self._select_parent()
+            parent = self._select_parent(iteration)
             hint = IMPROVEMENT_HINTS[iteration % len(IMPROVEMENT_HINTS)]
 
             error_context = ""
@@ -263,16 +344,19 @@ class SolutionTree:
                     "Fix this error first before making other improvements."
                 )
 
+            validation_feedback = self._build_validation_feedback(parent)
+
             user_prompt = IMPROVE_PROMPT.format(
                 description=description,
                 parent_score=parent.cv_score if parent.cv_score is not None else "N/A (no score produced)",
                 parent_code=parent.code,
                 parent_stdout=parent.stdout[-3000:] if parent.stdout else "<no output>",
                 error_context=error_context,
+                validation_feedback=validation_feedback,
                 improvement_hint=hint,
             )
             code = self.llm.generate_code(system=SYSTEM_PROMPT, user=user_prompt)
-            cv_score, stdout, exec_time, error = self._execute(code)
+            cv_score, stdout, exec_time, error, validation = self._execute(code)
 
             node = SolutionNode(
                 node_id=self._new_id(),
@@ -283,17 +367,74 @@ class SolutionTree:
                 error=error,
                 parent_id=parent.node_id,
                 iteration=iteration,
+                validation_report=validation,
             )
             self.nodes.append(node)
             logger.info(
-                "Node %d (parent=%d): cv_score=%s error=%s exec_time=%.1fs",
-                node.node_id, parent.node_id, cv_score, error, exec_time,
+                "Node %d (parent=%d): cv_score=%s error=%s valid=%s exec_time=%.1fs",
+                node.node_id, parent.node_id, cv_score, error,
+                validation.get("valid"), exec_time,
             )
             if on_node_complete:
                 on_node_complete(node)
 
-        total_time = time.time() - start_time
+        # -- Recovery phase ---------------------------------------------------
         best = self._best_node()
+        submission_path = self.workdir / "submission.csv"
+
+        if best and (best.error or not submission_path.exists()):
+            logger.info("Recovery phase: best node has issues, attempting recovery")
+
+            # Try re-running the best-scoring code
+            if best.code:
+                cv_score, stdout, exec_time, error, validation = self._execute(best.code)
+                if submission_path.exists():
+                    patch_submission_columns(submission_path, self.workdir)
+                    best = self._best_node()
+
+            # If still no submission, try LLM recovery
+            if not submission_path.exists():
+                logger.info("Recovery: no submission.csv, running %d LLM recovery steps", RECOVERY_ITERATIONS)
+                for ri in range(RECOVERY_ITERATIONS):
+                    recovery_prompt = (
+                        f"Competition description:\n{description}\n\n"
+                        f"Files available:\n{file_listing}\n\n"
+                        "CRITICAL: Your previous attempts failed to produce a valid submission.csv. "
+                        "Write the SIMPLEST possible solution:\n"
+                        "1. Read sample_submission.csv to understand the exact format needed\n"
+                        "2. Read test.csv\n"
+                        "3. Train a basic model (e.g. LogisticRegression or LGBMClassifier with defaults)\n"
+                        "4. Predict and save ./submission.csv matching sample_submission.csv exactly\n"
+                        "5. Print CV_SCORE=<float>\n"
+                        "Prioritize producing a VALID submission over model quality."
+                    )
+                    code = self.llm.generate_code(system=SYSTEM_PROMPT, user=recovery_prompt)
+                    cv_score, stdout, exec_time, error, validation = self._execute(code)
+                    if submission_path.exists() and validation.get("valid", False):
+                        node = SolutionNode(
+                            node_id=self._new_id(), code=code,
+                            cv_score=cv_score, stdout=stdout,
+                            exec_time=exec_time, error=error,
+                            parent_id=None, iteration=self.max_iterations + ri,
+                            validation_report=validation,
+                        )
+                        self.nodes.append(node)
+                        logger.info("Recovery step %d succeeded: cv_score=%s", ri, cv_score)
+                        break
+
+            # Last resort: copy sample_submission.csv
+            if not submission_path.exists():
+                sample_paths = list((self.workdir / "home" / "data").glob("sample_submission*.csv"))
+                if sample_paths:
+                    shutil.copy2(sample_paths[0], submission_path)
+                    logger.warning("Recovery: copied sample_submission.csv as fallback")
+
+        # Final patch on whatever submission we have
+        if submission_path.exists():
+            patch_submission_columns(submission_path, self.workdir)
+
+        best = self._best_node()
+        total_time = time.time() - start_time
         logger.info(
             "Tree search complete: %d nodes, best=%s (cv_score=%s), total=%.0fs",
             len(self.nodes),

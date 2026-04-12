@@ -16,6 +16,7 @@ from a2a.types import FilePart, FileWithBytes, Message, Part, TaskState, TextPar
 from a2a.utils import get_message_text, new_agent_text_message
 
 from llm import LLMClient
+from ml_helpers import patch_submission_columns, validate_submission_report
 from strategies import DEFAULT_STRATEGY, get_strategy
 from tree import SolutionTree
 
@@ -204,6 +205,15 @@ class Agent:
                     name="Error",
                 )
                 return
+
+            # Final validation and patching
+            validation = validate_submission_report(submission_path, workdir)
+            if not validation["valid"]:
+                logger.warning("Final submission has issues: %s", validation["summary"])
+                patch_submission_columns(submission_path, workdir)
+                validation = validate_submission_report(submission_path, workdir)
+                if not validation["valid"]:
+                    logger.warning("Post-patch still has issues: %s", validation["summary"])
 
             csv_bytes = submission_path.read_bytes()
             b64_out = base64.b64encode(csv_bytes).decode("ascii")
