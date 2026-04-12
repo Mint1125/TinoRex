@@ -18,7 +18,7 @@ RUN pip install --no-cache-dir .
 # Make scripts executable
 RUN chmod +x start_participant.sh
 
-EXPOSE 8000 8001 9009
+EXPOSE 8000 8001
 
 ENTRYPOINT ["bash", "start_participant.sh"]
 CMD ["--host", "0.0.0.0", "--port", "8000"]
