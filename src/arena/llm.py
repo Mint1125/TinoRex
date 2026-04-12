@@ -35,7 +35,7 @@ class ArenaLLM:
         self.model = OPENAI_MODEL
         self._client = OpenAI(api_key=api_key) if api_key else None
 
-    def synthesize(self, *, system: str, user: str, temperature: float = 0.5) -> str:
+    def synthesize(self, *, system: str, user: str, temperature: float = 1.0) -> str:
         """Generate a text response (for merging reports, selecting models, etc.)."""
         if not self._client:
             logger.error("No API key for Arena LLM")

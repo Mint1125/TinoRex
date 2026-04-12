@@ -1,5 +1,10 @@
 import argparse
+import os
 import uvicorn
+
+# Force UTF-8 on Windows to avoid cp949 codec errors
+os.environ["PYTHONUTF8"] = "1"
+os.environ["PYTHONIOENCODING"] = "utf-8"
 
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler

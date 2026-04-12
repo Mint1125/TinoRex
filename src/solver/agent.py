@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 _API_KEY_FILE = Path(r"C:/Users/PC4/OneDrive/바탕 화면/개인/개인정보/api_key.txt")
 
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "o4-mini")
-CODE_TIMEOUT = int(os.environ.get("CODE_TIMEOUT", "600"))
+CODE_TIMEOUT = int(os.environ.get("CODE_TIMEOUT", "300"))
 MAX_STDOUT_CHARS = 8000
 
 
@@ -278,16 +278,23 @@ class Agent:
 
         # If failed, try one repair
         if not result.succeeded:
+            error_tail = stdout[-2000:] if stdout else "(no output)"
             logger.warning(
-                "[%s/%s] First attempt failed: %s", stage, module, result.exc_type
+                "[%s/%s] First attempt failed: %s\n--- error tail ---\n%s",
+                stage, module, result.exc_type, error_tail[-500:]
             )
             repair_prompt = (
-                f"The previous code failed with this error:\n"
-                f"```\n{stdout[-3000:]}\n```\n\n"
+                f"The previous code FAILED. Here is the error output:\n"
+                f"```\n{error_tail}\n```\n\n"
+                f"IMPORTANT REMINDERS:\n"
+                f"- Data files are in ./home/data/ (train.csv, test.csv, etc.)\n"
+                f"- Save output files to ./ (current directory), NOT ./home/data/\n"
+                f"- Include all imports at the top\n"
+                f"- Wrap main logic in try/except\n\n"
                 f"Fix the error and return the COMPLETE corrected script.\n\n"
                 f"Original task:\n{user_prompt}"
             )
-            code = llm.generate_code(system=system_prompt, user=repair_prompt, temperature=0.5)
+            code = llm.generate_code(system=system_prompt, user=repair_prompt, temperature=1.0)
             result = interp.run(code)
             stdout = result.stdout
             if len(stdout) > MAX_STDOUT_CHARS:

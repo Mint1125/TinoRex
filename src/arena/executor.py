@@ -52,7 +52,8 @@ class Executor(AgentExecutor):
             if not updater._terminal_state_reached:
                 await updater.complete()
         except Exception as e:
-            print(f"Arena task failed: {e}")
+            import traceback
+            print(f"Arena task failed: {e}\n{traceback.format_exc()}")
             await updater.failed(
                 new_agent_text_message(f"Arena error: {e}", context_id=context_id, task_id=task.id)
             )

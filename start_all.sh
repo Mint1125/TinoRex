@@ -5,6 +5,10 @@
 ENV=${1:-test}
 BASE="$(cd "$(dirname "$0")" && pwd)"
 
+# Force UTF-8 on Windows (needed by mlebench to read description files)
+export PYTHONUTF8=1
+export PYTHONIOENCODING=utf-8
+
 declare -A services=(
     ["src/evaluator"]=9009
     ["src/arena"]=8000

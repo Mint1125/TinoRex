@@ -36,7 +36,7 @@ from a2a.utils import get_message_text, new_agent_text_message
 
 from llm import ArenaLLM
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 SOLVER_URL = os.environ.get("SOLVER_URL", "http://127.0.0.1:8001/")
@@ -67,11 +67,11 @@ Required JSON keys:
 - eval_metric: string or null
 - n_train: int
 - n_test: int
-- columns: list of {name, dtype, missing_rate, cardinality, role, notes}
+- columns: list of {{name, dtype, missing_rate, cardinality, role, notes}}
 - target_distribution: dict
-- top_correlations: list of {feature, correlation}
-- quality_issues: list of {column, issue}
-- feature_opportunities: list of {description, columns_involved, type}
+- top_correlations: list of {{feature, correlation}}
+- quality_issues: list of {{column, issue}}
+- feature_opportunities: list of {{description, columns_involved, type}}
 
 Report A:
 {report_a}
@@ -143,14 +143,22 @@ async def _call_solver(
 
             result_text = ""
             async for event in client.send_message(msg):
+                logger.debug("Event type: %s", type(event))
                 match event:
                     case (task, TaskArtifactUpdateEvent()):
                         for artifact in task.artifacts or []:
                             for part in artifact.parts:
                                 if isinstance(part.root, TextPart):
                                     result_text = part.root.text
+                        logger.info("Got artifact from solver (stage=%s, module=%s): %s chars",
+                                    payload.get("stage"), payload.get("module"),
+                                    len(result_text) if result_text else 0)
                     case _:
                         pass
+
+            if not result_text:
+                logger.warning("No result text from solver (stage=%s, module=%s)",
+                               payload.get("stage"), payload.get("module"))
 
             if result_text:
                 try:
@@ -161,8 +169,10 @@ async def _call_solver(
             return None
 
     except Exception as exc:
-        logger.error("Solver call failed (stage=%s, module=%s): %s",
-                      payload.get("stage"), payload.get("module"), exc)
+        import traceback
+        logger.error("Solver call failed (stage=%s, module=%s): %s\n%s",
+                      payload.get("stage"), payload.get("module"), exc,
+                      traceback.format_exc())
         return None
 
 
@@ -218,6 +228,17 @@ class Agent:
         if ctx in self._done_contexts:
             return
 
+        try:
+            await self._run_pipeline(message, updater, ctx)
+        except Exception as exc:
+            import traceback
+            logger.error("Pipeline crashed: %s\n%s", exc, traceback.format_exc())
+            await updater.add_artifact(
+                parts=[Part(root=TextPart(text=f"Pipeline error: {exc}"))],
+                name="Error",
+            )
+
+    async def _run_pipeline(self, message: Message, updater: TaskUpdater, ctx: str) -> None:
         # Extract tar from message
         tar_b64 = _first_tar_from_message(message)
         if not tar_b64:
@@ -269,10 +290,15 @@ class Agent:
             synthesis_prompt = _get_eda_synthesis_prompt().format(
                 report_a=rpt_a, report_b=rpt_b, report_c=rpt_c
             )
-            eda_report = self._llm.synthesize(
-                system="You are a data analyst merging EDA reports into one JSON.",
-                user=synthesis_prompt,
-            )
+            try:
+                eda_report = self._llm.synthesize(
+                    system="You are a data analyst merging EDA reports into one JSON.",
+                    user=synthesis_prompt,
+                )
+                logger.info("[Stage 1] EDA synthesis completed (%d chars)", len(eda_report))
+            except Exception as exc:
+                logger.error("[Stage 1] EDA synthesis LLM failed: %s", exc)
+                eda_report = list(reports.values())[0]
         elif reports:
             eda_report = list(reports.values())[0]
         else:
@@ -413,7 +439,7 @@ class Agent:
         except (json.JSONDecodeError, TypeError):
             pass
 
-        n_trials = 50
+        n_trials = 20
         extra_per_module = {}
         module_letters = ["A", "B", "C"]
         for i, m in enumerate(selected_models[:3]):

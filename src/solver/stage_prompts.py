@@ -17,13 +17,17 @@ You write COMPLETE, SELF-CONTAINED Python scripts. Every script must:
 - Include all imports at the top.
 - Be runnable in a fresh Python process with no prior state.
 - Use only libraries available in the environment: pandas, numpy, sklearn, \
-lightgbm, xgboost, catboost, optuna, scipy, torch, torchvision.
+lightgbm, xgboost, catboost, optuna, scipy, pyarrow.
 
-Rules:
+CRITICAL RULES:
+- Data files are in ./home/data/ (train.csv, test.csv, sample_submission.csv, etc.)
+- Save all output files to the CURRENT WORKING DIRECTORY (./) — NOT inside ./home/data/
 - NEVER hardcode predictions, labels, or column names from memory.
 - Always discover the data schema by reading files at runtime.
-- Handle errors gracefully and print diagnostics.
+- Handle errors gracefully with try/except and print diagnostics.
 - Keep stdout concise — only print what is needed.
+- Always wrap main logic in try/except to ensure partial output on failure.
+- Use print() for all output markers (CV_SCORE=, MODEL_RESULT=, etc.)
 """
 
 # ---------------------------------------------------------------------------
@@ -47,12 +51,10 @@ EDA_SYSTEM = SYSTEM_PROMPT + """
 Your task is exploratory data analysis. Write a script that reads the data \
 and prints a JSON report wrapped between EDA_REPORT_START and EDA_REPORT_END markers.
 
-Output format:
-```
-EDA_REPORT_START
-{...json...}
-EDA_REPORT_END
-```
+Output format (print these exact markers):
+print("EDA_REPORT_START")
+print(json.dumps(report_dict))
+print("EDA_REPORT_END")
 """
 
 EDA_MODULES = {
@@ -64,11 +66,10 @@ Focus on STATISTICAL PROFILING:
 - Target column identification (from sample_submission.csv columns[1])
 - ID column identification (from sample_submission.csv columns[0])
 - Task type detection (binary classification, multiclass, regression)
-- For each column: dtype, missing rate, unique count, top 5 values
+- For each column: dtype, missing rate, unique count
 - Numeric columns: mean, std, min, max, median, skewness
-- Target distribution (value_counts for classification, histogram stats for regression)
+- Target distribution (value_counts for classification)
 - Pearson correlations between numeric features and target (top 10)
-- Class balance ratio (for classification)
 
 Print the report as a JSON dict with keys: task_type, target_col, id_col, n_train, \
 n_test, n_features, columns (list of dicts), target_distribution, top_correlations.
@@ -83,13 +84,12 @@ Focus on DATA QUALITY:
 - Find constant or near-constant columns (>99% same value)
 - Detect potential data leakage (features too correlated with target, r>0.95)
 - Identify high-cardinality categorical columns (>100 unique values)
-- Check for mixed types in columns (e.g., numbers stored as strings)
-- Detect outliers (values beyond 3 std from mean)
-- Check if train/test distributions differ significantly per column
+- Check for mixed types in columns
+- Check if train/test distributions differ significantly
 
 Print the report as a JSON dict with keys: quality_issues (list of dicts with \
 column, issue, details), leakage_suspects, high_cardinality_cols, \
-mixed_type_cols, train_test_drift (list of columns with distribution shift).
+train_test_drift (list of columns with distribution shift).
 """,
     },
     "C": {
@@ -99,17 +99,15 @@ Focus on DOMAIN UNDERSTANDING and FEATURE ENGINEERING OPPORTUNITIES:
 - Read description.md to understand the competition goal and evaluation metric
 - Infer semantic meaning of columns from names and values
 - Identify columns that could be split (e.g., delimited strings, composite IDs)
-- Identify columns that could be grouped (e.g., same prefix, related semantics)
-- Suggest interaction features (column pairs likely to have non-linear relationships)
+- Identify columns that could be grouped
+- Suggest interaction features (column pairs with non-linear relationships)
 - Suggest aggregation features (group-by statistics)
 - Identify boolean-like columns stored as strings
-- Detect datetime-like columns that could yield time features
-- Suggest encoding strategies for different categorical types
+- Detect datetime-like columns
 
 Print the report as a JSON dict with keys: competition_goal, eval_metric (if found), \
-splittable_cols (list with column and delimiter), groupable_cols, \
-interaction_candidates (list of column pairs), aggregation_candidates, \
-boolean_cols, datetime_cols, encoding_suggestions (dict of column: strategy).
+splittable_cols, groupable_cols, interaction_candidates (list of column pairs), \
+boolean_cols, datetime_cols, encoding_suggestions.
 """,
     },
 }
@@ -156,17 +154,27 @@ Output ONLY the merged JSON (no markdown fences, no explanation):
 # ---------------------------------------------------------------------------
 
 FEATURES_SYSTEM = SYSTEM_PROMPT + """
-Your task is feature engineering. Write a script that:
+Your task is feature engineering. Write a COMPLETE Python script that:
 1. Reads train.csv and test.csv from ./home/data/
-2. Applies feature engineering informed by the EDA report.
-3. Runs a quick LightGBM 5-fold CV to validate feature quality.
-4. Prints exactly: CV_SCORE=<float>
-5. Saves engineered features as train_features.parquet and test_features.parquet \
-in the current working directory.
-6. Saves feature_names.json (list of feature column names).
+2. Reads sample_submission.csv to identify the ID column (columns[0]) and target column (columns[1])
+3. Applies feature engineering informed by the EDA report
+4. Runs a quick LightGBM 5-fold CV to validate feature quality
+5. Prints exactly one line: CV_SCORE=<float> (e.g., CV_SCORE=0.8123)
+6. Saves to CURRENT DIRECTORY (not home/data/):
+   - train_features.parquet (features only, no target, no ID)
+   - test_features.parquet (features only, no ID)
+   - target.npy (numpy array of target values)
+   - test_ids.npy (numpy array of test ID values)
+   - feature_names.json (list of feature column names)
 
-IMPORTANT: The target column and ID column must NOT be in the feature parquets.
-Save the target as target.npy and IDs as test_ids.npy separately.
+IMPORTANT:
+- The target and ID columns must NOT be in the feature parquets.
+- Use LabelEncoder or OrdinalEncoder for categorical columns before saving.
+- Make sure train and test have the SAME columns in the SAME order.
+- Wrap everything in try/except and print errors.
+
+Example output line:
+CV_SCORE=0.8123
 """
 
 FEATURES_MODULES = {
@@ -175,9 +183,9 @@ FEATURES_MODULES = {
         "instructions": """\
 Focus on INTERACTION and POLYNOMIAL features:
 - Create pairwise interaction features for the top correlated numeric columns
-- Create polynomial features (degree 2) for the most important numeric columns
 - Create ratio features between related numeric columns
 - Apply log1p transforms to skewed numeric columns
+- Basic preprocessing: impute missing values, encode categoricals
 - Use the EDA report to guide which interactions are most promising
 """,
     },
@@ -185,10 +193,10 @@ Focus on INTERACTION and POLYNOMIAL features:
         "focus": "aggregation and groupby features",
         "instructions": """\
 Focus on AGGREGATION and GROUP-BY features:
-- If there are groupable columns (from EDA), compute group statistics (mean, std, count, min, max)
+- If there are groupable columns (from EDA), compute group statistics (mean, std, count)
 - If there are splittable columns, split them and create derived features
 - Create frequency encoding for categorical columns
-- Create target encoding using 5-fold CV (to avoid leakage) for classification tasks
+- Basic preprocessing: impute missing values, encode categoricals
 - Use the EDA report to identify the best grouping keys
 """,
     },
@@ -196,13 +204,12 @@ Focus on AGGREGATION and GROUP-BY features:
         "focus": "encoding strategies and missing value handling",
         "instructions": """\
 Focus on ENCODING and MISSING VALUE strategies:
-- Apply appropriate encoding per column type (from EDA suggestions):
-  ordinal encoding for low-cardinality, target encoding for high-cardinality
+- Apply ordinal encoding for low-cardinality categoricals
 - Create missing value indicator columns for columns with >5% missing
 - Apply intelligent imputation (median for numeric, mode for categorical)
 - Cast boolean-like string columns to int
-- Parse datetime columns into year/month/day/dayofweek features
 - Drop columns flagged as "drop" in the EDA report
+- Basic preprocessing for all other columns
 """,
     },
 }
@@ -212,13 +219,19 @@ Focus on ENCODING and MISSING VALUE strategies:
 # ---------------------------------------------------------------------------
 
 MODEL_SYSTEM = SYSTEM_PROMPT + """
-Your task is model selection. Write a script that:
-1. Loads train_features.parquet and target.npy from the current working directory.
-2. Trains multiple models with default/reasonable hyperparameters using 5-fold CV.
-3. For EACH model tested, prints: MODEL_RESULT={"name":"...", "cv_score":..., "train_time_s":...}
-4. Prints the best CV_SCORE=<float>
+Your task is model selection. Write a COMPLETE Python script that:
+1. Loads train_features.parquet and target.npy from the CURRENT DIRECTORY (./)
+2. Trains multiple models with default/reasonable hyperparameters using 5-fold CV
+3. For EACH model tested, prints exactly: MODEL_RESULT={"name":"ModelName", "cv_score":0.1234, "train_time_s":5.6}
+4. Prints the best: CV_SCORE=<float>
 
-Use StratifiedKFold for classification, KFold for regression.
+Use StratifiedKFold for classification, KFold for regression. 5 folds.
+Import and handle errors for each model independently — if one model fails, continue with others.
+
+Example output:
+MODEL_RESULT={"name":"LGBMClassifier", "cv_score":0.8123, "train_time_s":3.2}
+MODEL_RESULT={"name":"XGBClassifier", "cv_score":0.8056, "train_time_s":5.1}
+CV_SCORE=0.8123
 """
 
 MODEL_MODULES = {
@@ -226,32 +239,31 @@ MODEL_MODULES = {
         "focus": "gradient boosting models",
         "instructions": """\
 Test GRADIENT BOOSTING models:
-- XGBoost (XGBClassifier/XGBRegressor) with reasonable defaults
-- LightGBM (LGBMClassifier/LGBMRegressor) with reasonable defaults
-- CatBoost (CatBoostClassifier/CatBoostRegressor) with reasonable defaults
-- Print MODEL_RESULT for each.
+- LightGBM (LGBMClassifier/LGBMRegressor) with verbose=-1
+- XGBoost (XGBClassifier/XGBRegressor) with verbosity=0
+- CatBoost (CatBoostClassifier/CatBoostRegressor) with verbose=0
+- Print MODEL_RESULT JSON for each. Handle import/fit errors with try/except.
 """,
     },
     "B": {
         "focus": "linear and SVM models",
         "instructions": """\
-Test LINEAR and SVM models:
-- LogisticRegression / Ridge (with scaling via StandardScaler)
-- SVM (SVC/SVR with scaling, use probability=True for classification)
-- ElasticNet / SGDClassifier
-- Print MODEL_RESULT for each.
-Note: These models need feature scaling. Include StandardScaler in a Pipeline.
+Test LINEAR models (with StandardScaler in a Pipeline):
+- LogisticRegression / Ridge
+- SVM (LinearSVC with dual='auto' or SGDClassifier)
+- ElasticNet (regression) or SGDClassifier (classification)
+- Print MODEL_RESULT JSON for each. Handle import/fit errors with try/except.
+Note: Scale features first with StandardScaler.
 """,
     },
     "C": {
         "focus": "ensemble and neural models",
         "instructions": """\
-Test ENSEMBLE and NEURAL models:
+Test ENSEMBLE and TREE models:
 - RandomForest (RandomForestClassifier/RandomForestRegressor)
 - ExtraTrees (ExtraTreesClassifier/ExtraTreesRegressor)
-- MLP (MLPClassifier/MLPRegressor with scaling)
 - HistGradientBoosting (HistGradientBoostingClassifier/HistGradientBoostingRegressor)
-- Print MODEL_RESULT for each.
+- Print MODEL_RESULT JSON for each. Handle import/fit errors with try/except.
 """,
     },
 }
@@ -266,9 +278,9 @@ Task type: {task_type}
 
 Select exactly 3 models for the ensemble. Priorities:
 1. Highest CV scores
-2. Model diversity — if the top 3 are all from the same family (e.g., all gradient boosting), \
+2. Model diversity — if the top 3 are all from the same family, \
 replace the weakest with the best model from a different family.
-3. Reasonable training time (skip models >300s unless significantly better)
+3. Reasonable training time
 
 Output a JSON list of 3 objects: [{{"name": "...", "cv_score": ..., "reason": "..."}}]
 Output ONLY the JSON (no markdown fences, no explanation):
@@ -279,18 +291,19 @@ Output ONLY the JSON (no markdown fences, no explanation):
 # ---------------------------------------------------------------------------
 
 OPTUNA_SYSTEM = SYSTEM_PROMPT + """
-Your task is hyperparameter tuning with Optuna. Write a script that:
-1. Loads train_features.parquet and target.npy from the current working directory.
-2. Defines an Optuna objective function for the specified model.
-3. You DECIDE the search space based on your expertise with this model family \
-and the dataset characteristics (n_rows, n_features from the EDA report).
-4. Runs optuna.create_study().optimize(objective, n_trials=N).
-5. Prints: BEST_PARAMS=<json dict>
-6. Prints: BEST_SCORE=<float>
-7. Saves best_params_{model_name}.json to the current working directory.
+Your task is hyperparameter tuning with Optuna. Write a COMPLETE Python script that:
+1. Loads train_features.parquet and target.npy from the CURRENT DIRECTORY (./)
+2. Defines an Optuna objective function for the specified model
+3. You DECIDE the search space based on your expertise with this model family
+4. Runs optuna.create_study().optimize(objective, n_trials=N)
+5. Prints exactly: BEST_PARAMS={"param1": value1, ...}
+6. Prints exactly: BEST_SCORE=<float>
+7. Saves best_params_{model_name}.json to the CURRENT DIRECTORY
 
-Use StratifiedKFold for classification, KFold for regression. Use 5 folds.
-Suppress Optuna logging (optuna.logging.set_verbosity(optuna.logging.WARNING)).
+Use StratifiedKFold for classification, KFold for regression. 5 folds.
+Set optuna.logging.set_verbosity(optuna.logging.WARNING) to suppress logs.
+
+IMPORTANT: Use json.dumps() for BEST_PARAMS to ensure valid JSON output.
 """
 
 OPTUNA_MODULE_TEMPLATE = """\
@@ -309,18 +322,23 @@ Design an appropriate search space for {model_name}. Consider:
 # ---------------------------------------------------------------------------
 
 STACKING_SYSTEM = SYSTEM_PROMPT + """
-Your task is building a stacking ensemble. Write a script that:
-1. Loads train_features.parquet, test_features.parquet, and target.npy.
-2. Loads tuned parameters from best_params_*.json files.
-3. Level 1: For each of the specified base models, generate out-of-fold (OOF) \
-predictions on train using K-fold CV, and full predictions on test.
-4. Level 2: Train a meta-learner on the OOF predictions.
-5. Prints: CV_SCORE=<float> (the full stacking pipeline CV score)
-6. Saves: submission.csv (using test_ids.npy for the ID column), \
-oof_predictions.npy, test_predictions.npy
+Your task is building a stacking ensemble. Write a COMPLETE Python script that:
+1. Loads train_features.parquet, test_features.parquet, and target.npy from CURRENT DIRECTORY (./)
+2. Loads test_ids.npy for the submission ID column
+3. Reads sample_submission.csv from ./home/data/ to get column names and output format
+4. Loads tuned parameters from best_params_*.json files in CURRENT DIRECTORY (use glob)
+5. Level 1: For each base model, generate OOF predictions on train using 5-fold CV, and full predictions on test
+6. Level 2: Train a meta-learner on the OOF predictions
+7. Prints exactly: CV_SCORE=<float> (the full stacking pipeline CV score)
+8. Saves: submission.csv (matching sample_submission.csv format exactly)
+9. Also saves: oof_predictions.npy, test_predictions.npy
 
-Use 5-fold StratifiedKFold for classification, KFold for regression.
-For binary classification, use predict_proba[:, 1] for OOF (probabilities).
+IMPORTANT:
+- Use glob.glob("best_params_*.json") to find available param files
+- If a param file is missing for a model, use that model with default params
+- For binary classification, use predict_proba[:, 1] for OOF probabilities
+- submission.csv must have the same columns as sample_submission.csv
+- Use 5-fold StratifiedKFold for classification, KFold for regression
 """
 
 STACKING_MODULES = {
@@ -330,26 +348,22 @@ STACKING_MODULES = {
 Meta-learner strategy: LogisticRegression (classification) or Ridge (regression).
 - OOF matrix: shape (n_train, n_base_models) with predicted probabilities or values.
 - Meta-learner trained on OOF matrix → predict on test predictions matrix.
-- Apply proper CV on the meta-learner too (nested CV or simple fit on full OOF).
 """,
     },
     "B": {
         "focus": "LightGBM meta-learner",
         "instructions": """\
-Meta-learner strategy: LightGBM with low complexity (max_depth=3, n_estimators=100).
+Meta-learner strategy: LightGBM with low complexity (max_depth=3, n_estimators=100, verbose=-1).
 - OOF matrix: shape (n_train, n_base_models) with predicted probabilities or values.
-- Use Optuna (10 trials) to quickly tune the meta-learner.
 - This can capture non-linear interactions between base model predictions.
 """,
     },
     "C": {
-        "focus": "rank averaging (no meta-learner)",
+        "focus": "simple averaging",
         "instructions": """\
-Meta-learner strategy: Rank averaging (no trained meta-learner).
-- For each base model, rank its test predictions (scipy.stats.rankdata).
-- Average the ranks across base models.
-- For classification: convert averaged ranks to binary predictions \
-using a threshold optimized on OOF rank averages.
+Meta-learner strategy: Simple averaging (no trained meta-learner).
+- Average the OOF/test predictions from all base models.
+- For classification: average probabilities, then threshold at 0.5.
 - This is robust and avoids overfitting the meta-learner.
 """,
     },
@@ -360,16 +374,16 @@ using a threshold optimized on OOF rank averages.
 # ---------------------------------------------------------------------------
 
 THRESHOLD_SYSTEM = SYSTEM_PROMPT + """
-Your task is threshold optimization for classification. Write a script that:
-1. Loads oof_predictions.npy and target.npy.
-2. Searches for the optimal classification threshold to maximize the metric.
-3. Prints: CV_SCORE=<float> (score with optimized threshold on OOF)
-4. Prints: THRESHOLD=<float or json>
-5. If the optimized score is better, loads test_predictions.npy, applies the \
-threshold, and overwrites submission.csv (using test_ids.npy for IDs).
+Your task is threshold optimization for classification. Write a COMPLETE Python script that:
+1. Loads oof_predictions.npy and target.npy from CURRENT DIRECTORY
+2. Loads test_predictions.npy and test_ids.npy from CURRENT DIRECTORY
+3. Reads sample_submission.csv from ./home/data/ for output format
+4. Searches for the optimal classification threshold
+5. Prints exactly: CV_SCORE=<float> (score with optimized threshold on OOF)
+6. Prints exactly: THRESHOLD=<float>
+7. If the optimized score is better, saves a new submission.csv
 
-Read the target and sample_submission.csv to determine the output format \
-(True/False vs 1/0 vs class labels).
+IMPORTANT: Match the exact format of sample_submission.csv (same column names, same value format).
 """
 
 THRESHOLD_MODULES = {
@@ -377,9 +391,8 @@ THRESHOLD_MODULES = {
         "focus": "grid search",
         "instructions": """\
 Strategy: GRID SEARCH over thresholds.
-- Search range: [0.01, 0.02, ..., 0.99] (99 thresholds)
-- Evaluate each threshold on OOF predictions vs true labels
-- Use accuracy (or the competition metric if known) as the objective
+- Search range: numpy.arange(0.30, 0.70, 0.01)
+- Evaluate each threshold on OOF predictions vs true labels using accuracy
 - Print the best threshold and its score
 """,
     },
@@ -388,19 +401,17 @@ Strategy: GRID SEARCH over thresholds.
         "instructions": """\
 Strategy: SCIPY OPTIMIZATION.
 - Use scipy.optimize.minimize_scalar to find the optimal threshold
-- Bounds: (0.01, 0.99), method='bounded'
-- Objective: negative accuracy (or competition metric) on OOF
-- This finds the precise optimum, not just grid points
+- Bounds: (0.30, 0.70), method='bounded'
+- Objective: negative accuracy on OOF
 """,
     },
     "C": {
-        "focus": "Optuna threshold search",
+        "focus": "fine grid search",
         "instructions": """\
-Strategy: OPTUNA THRESHOLD SEARCH.
-- Use Optuna with 30 trials to optimize the threshold
-- trial.suggest_float("threshold", 0.01, 0.99)
-- Objective: accuracy (or competition metric) on OOF predictions
-- For multiclass: optimize per-class thresholds
+Strategy: TWO-PHASE GRID SEARCH.
+- Phase 1: Coarse search numpy.arange(0.20, 0.80, 0.05)
+- Phase 2: Fine search around best ±0.05 with step 0.005
+- This finds a more precise optimum than a single grid
 """,
     },
 }
