@@ -1,11 +1,10 @@
-"""v9 Hybrid Solver: Baseline safety net + LLM tree search + refinement.
+"""v10 ReAct Solver: Persistent session agent with tool use.
 
-Pipeline:
-  Phase 1: Data profiling (automated)
-  Phase 2: Baseline (deterministic, parallel safety net)
-  Phase 3: LLM tree search (writes from scratch, NOT from baseline)
-           + persistent session refinement (integrated into tree search)
-  Final:   Pick best by CV score between baseline and tree search
+Replaces tree search (complete script generation) with ReAct pattern:
+  - LLM interacts via run_python (persistent session) + validate_submission
+  - Variables, imports, and models survive between calls
+  - LLM decides when to explore, model, validate, and finish
+  - Baseline safety net if ReAct agent fails to produce submission
 """
 
 from __future__ import annotations
@@ -30,8 +29,8 @@ from interpreter import Interpreter
 from llm import LLMClient
 from ml_helpers import patch_submission_columns, validate_submission_report
 from profiler import run_profiler
+from react_agent import ReactMLAgent
 from strategies import DEFAULT_STRATEGY, get_strategy
-from tree import SolutionTree
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -39,9 +38,8 @@ logger = logging.getLogger(__name__)
 _API_KEY_FILE = Path(r"C:/Users/PC4/OneDrive/바탕 화면/개인/개인정보/api_key.txt")
 
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "o4-mini")
-MAX_ITERATIONS = int(os.environ.get("MAX_ITERATIONS", "15"))
+MAX_ITERATIONS = int(os.environ.get("MAX_ITERATIONS", "30"))
 CODE_TIMEOUT = int(os.environ.get("CODE_TIMEOUT", "600"))
-REFINE_STEPS = int(os.environ.get("REFINE_STEPS", "5"))
 
 
 def _load_api_keys() -> dict[str, str]:
@@ -150,8 +148,8 @@ class Agent:
         await updater.update_status(
             TaskState.working,
             new_agent_text_message(
-                f"v9 Solver starting (strategy={strategy_name}, model={OPENAI_MODEL}, "
-                f"iterations={MAX_ITERATIONS})"
+                f"ReAct Solver starting (strategy={strategy_name}, model={OPENAI_MODEL}, "
+                f"max_steps={MAX_ITERATIONS})"
             ),
         )
 
@@ -171,7 +169,7 @@ class Agent:
             loop = __import__("asyncio").get_running_loop()
 
             # =================================================================
-            # PHASE 1: Data Profiling
+            # PHASE 1: Data Profiling (quick, for status reporting)
             # =================================================================
             await updater.update_status(
                 TaskState.working,
@@ -179,82 +177,34 @@ class Agent:
             )
             try:
                 data_profile = await loop.run_in_executor(
-                    None, lambda: run_profiler(workdir, timeout=90)
+                    None, lambda: run_profiler(workdir, timeout=60)
                 )
-                logger.info("Phase 1 complete: %d chars profile", len(data_profile))
-            except Exception as exc:
-                logger.warning("Phase 1 failed: %s", exc)
+                logger.info("Data profile: %d chars", len(data_profile))
+            except Exception:
                 data_profile = ""
 
             # =================================================================
-            # PHASE 2: Deterministic Baseline (safety net)
-            # =================================================================
-            await updater.update_status(
-                TaskState.working,
-                new_agent_text_message("Phase 2: Running deterministic baseline (safety net)..."),
-            )
-
-            baseline_code = get_baseline_script()
-            baseline_score = None
-            baseline_submission = workdir / "_baseline_submission.csv"
-
-            try:
-                interp = Interpreter(workdir=workdir, timeout=CODE_TIMEOUT)
-                try:
-                    result = interp.run(baseline_code)
-                finally:
-                    interp.cleanup()
-
-                if result.succeeded:
-                    baseline_score = _parse_cv_score(result.stdout)
-                    if submission_path.exists():
-                        patch_submission_columns(submission_path, workdir)
-                        shutil.copy2(submission_path, baseline_submission)
-                        logger.info("Phase 2 complete: baseline_score=%s", baseline_score)
-                    else:
-                        logger.warning("Phase 2: no submission.csv produced")
-                else:
-                    logger.warning("Phase 2 failed: %s", result.exc_type)
-            except Exception as exc:
-                logger.warning("Phase 2 error: %s", exc)
-
-            await updater.update_status(
-                TaskState.working,
-                new_agent_text_message(f"Phase 2 done: baseline_score={baseline_score}"),
-            )
-
-            # =================================================================
-            # PHASE 3: LLM Tree Search (from scratch, NOT from baseline)
-            #          + integrated persistent refinement
+            # PHASE 2: ReAct Agent (main solving engine)
             # =================================================================
             await updater.update_status(
                 TaskState.working,
                 new_agent_text_message(
-                    f"Phase 3: LLM tree search ({MAX_ITERATIONS} iterations + "
-                    f"{REFINE_STEPS} refine steps)..."
+                    f"Phase 2: ReAct agent ({MAX_ITERATIONS} steps, strategy={strategy_name})..."
                 ),
             )
 
             llm = LLMClient(api_key=api_key, model=OPENAI_MODEL)
-            tree = SolutionTree(
-                workdir=workdir,
-                llm=llm,
-                max_iterations=MAX_ITERATIONS,
-                code_timeout=CODE_TIMEOUT,
-                strategy_name=strategy_name,
-                refine_steps=REFINE_STEPS,
-            )
 
-            def on_node_complete(node):
+            # Build instructions from the evaluator message
+            instructions = get_message_text(message) or ""
+
+            def on_step(step, total, cv_score):
                 try:
                     __import__("asyncio").run_coroutine_threadsafe(
                         updater.update_status(
                             TaskState.working,
                             new_agent_text_message(
-                                f"Node {node.node_id}: "
-                                f"cv_score={node.cv_score} "
-                                f"error={node.error} "
-                                f"time={node.exec_time:.0f}s"
+                                f"Step {step}/{total}: cv={cv_score}"
                             ),
                         ),
                         loop,
@@ -262,56 +212,81 @@ class Agent:
                 except Exception:
                     pass
 
+            react_score = None
             try:
-                tree_result = await loop.run_in_executor(
-                    None,
-                    lambda: tree.run(
-                        strategy=strategy_text,
-                        data_profile=data_profile,
-                        on_node_complete=on_node_complete,
-                    ),
+                agent = ReactMLAgent(
+                    workdir=workdir,
+                    llm=llm,
+                    max_iterations=MAX_ITERATIONS,
+                    code_timeout=CODE_TIMEOUT,
+                    exploration_hint=strategy_text,
                 )
-                tree_score = tree_result.best_node.cv_score if tree_result.best_node else None
-                logger.info("Phase 3 complete: tree_score=%s", tree_score)
+                result_path = await loop.run_in_executor(
+                    None,
+                    lambda: agent.run(instructions, on_step=on_step),
+                )
+                react_score = agent.best_cv_score
+                logger.info("ReAct agent done: path=%s cv=%s", result_path, react_score)
             except Exception as exc:
-                logger.exception("Phase 3 failed")
-                tree_result = None
-                tree_score = None
+                logger.exception("ReAct agent failed: %s", exc)
+                result_path = None
 
-            # =================================================================
-            # FINAL: Pick best submission by CV score
-            # =================================================================
-            # Tree search result is current submission.csv
-            tree_submission = workdir / "_tree_submission.csv"
+            # Save ReAct submission
+            react_submission = workdir / "_react_submission.csv"
             if submission_path.exists():
-                shutil.copy2(submission_path, tree_submission)
+                patch_submission_columns(submission_path, workdir)
+                shutil.copy2(submission_path, react_submission)
 
-            # Decide: use tree search or baseline?
-            use_baseline = False
-            if tree_score is not None and baseline_score is not None:
-                use_baseline = baseline_score > tree_score
-            elif tree_score is None and baseline_score is not None:
-                use_baseline = True
+            await updater.update_status(
+                TaskState.working,
+                new_agent_text_message(f"ReAct done: cv={react_score}"),
+            )
 
-            if use_baseline and baseline_submission.exists():
-                logger.info("Using baseline (score=%s > tree=%s)", baseline_score, tree_score)
-                shutil.copy2(baseline_submission, submission_path)
-            elif tree_submission.exists():
-                shutil.copy2(tree_submission, submission_path)
+            # =================================================================
+            # PHASE 3: Baseline Safety Net (if ReAct failed)
+            # =================================================================
+            baseline_score = None
+            baseline_submission = workdir / "_baseline_submission.csv"
+
+            if not react_submission.exists():
+                await updater.update_status(
+                    TaskState.working,
+                    new_agent_text_message("ReAct failed — running baseline safety net..."),
+                )
+                try:
+                    baseline_code = get_baseline_script()
+                    interp = Interpreter(workdir=workdir, timeout=CODE_TIMEOUT)
+                    try:
+                        result = interp.run(baseline_code)
+                    finally:
+                        interp.cleanup()
+
+                    if result.succeeded:
+                        baseline_score = _parse_cv_score(result.stdout)
+                        if submission_path.exists():
+                            patch_submission_columns(submission_path, workdir)
+                            shutil.copy2(submission_path, baseline_submission)
+                            logger.info("Baseline safety net: score=%s", baseline_score)
+                except Exception as exc:
+                    logger.warning("Baseline also failed: %s", exc)
+
+            # =================================================================
+            # FINAL: Pick best submission
+            # =================================================================
+            if react_submission.exists():
+                shutil.copy2(react_submission, submission_path)
             elif baseline_submission.exists():
                 shutil.copy2(baseline_submission, submission_path)
 
-            # Final validation
             if submission_path.exists():
                 patch_submission_columns(submission_path, workdir)
 
             if not submission_path.exists():
-                # Last resort: sample submission
                 data_dir = workdir / "home" / "data"
                 sample_paths = list(data_dir.glob("sample_submission*.csv"))
                 if sample_paths:
                     shutil.copy2(sample_paths[0], submission_path)
-                    logger.warning("Using sample_submission as fallback")
+                    logger.warning("Using sample_submission as last resort")
 
             if not submission_path.exists():
                 await updater.add_artifact(
@@ -320,17 +295,14 @@ class Agent:
                 )
                 return
 
-            best_score = max(filter(None, [baseline_score, tree_score]), default=None)
+            best_score = react_score or baseline_score
             csv_bytes = submission_path.read_bytes()
             b64_out = base64.b64encode(csv_bytes).decode("ascii")
 
             summary = (
-                f"Tree search complete: "
-                f"{len(tree_result.all_nodes) if tree_result else 0} nodes, "
+                f"ReAct solver complete: "
                 f"best_score={best_score}, "
-                f"tree={tree_score}, baseline={baseline_score}, "
-                f"used={'baseline' if use_baseline else 'tree'}, "
-                f"total_time={tree_result.total_time:.0f}s, "
+                f"react_cv={react_score}, "
                 f"strategy={strategy_name}"
             )
 

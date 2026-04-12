@@ -75,6 +75,71 @@ class LLMClient:
         }
         return LLMResponse(text=text, usage=usage)
 
+    def chat(
+        self,
+        *,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+    ) -> dict:
+        """Multi-turn chat with optional tool calling.
+
+        Returns dict with keys:
+          - "message": dict suitable for appending to messages list
+          - "text": assistant text content
+          - "tool_calls": list of {id, name, args} dicts (empty if none)
+        """
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+        }
+        if tools:
+            kwargs["tools"] = tools
+        # Anthropic requires max_tokens
+        if self.provider == "anthropic":
+            kwargs["max_tokens"] = 16384
+
+        resp = self._client.chat.completions.create(**kwargs)
+        choice = resp.choices[0]
+        msg = choice.message
+
+        # Build tool_calls list
+        tool_calls = []
+        if msg.tool_calls:
+            for tc in msg.tool_calls:
+                try:
+                    args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
+                tool_calls.append({
+                    "id": tc.id,
+                    "name": tc.function.name,
+                    "args": args,
+                })
+
+        # Build message dict for conversation history
+        msg_dict: dict[str, Any] = {
+            "role": "assistant",
+            "content": msg.content or "",
+        }
+        if msg.tool_calls:
+            msg_dict["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments or "{}",
+                    },
+                }
+                for tc in msg.tool_calls
+            ]
+
+        return {
+            "message": msg_dict,
+            "text": msg.content or "",
+            "tool_calls": tool_calls,
+        }
+
     def generate_code(self, *, system: str, user: str, temperature: float = 1.0) -> str:
         """Generate and extract a Python code block from the LLM response."""
         resp = self.generate(system=system, user=user, temperature=temperature)

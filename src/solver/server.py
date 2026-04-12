@@ -21,22 +21,22 @@ def main():
     args = parser.parse_args()
 
     skill = AgentSkill(
-        id="hybrid_solver",
-        name="Hybrid ML Solver v9",
+        id="react_solver",
+        name="ReAct ML Solver v10",
         description=(
-            "v9 Hybrid solver: deterministic baseline (stacking ensemble) + "
-            "toolkit-augmented LLM tree search + persistent session refinement. "
+            "ReAct solver: LLM interacts with data via persistent Python session "
+            "using run_python + validate_submission tools. Baseline safety net. "
             "Receives competition tar.gz + strategy, returns best submission.csv."
         ),
-        tags=["solver", "hybrid", "baseline", "tree-search", "mle-bench"],
+        tags=["solver", "react", "persistent-session", "mle-bench"],
         examples=[],
     )
 
     agent_card = AgentCard(
-        name="TinoRex Solver v9",
-        description="Hybrid ML competition solver: baseline + tree search + refinement",
+        name="TinoRex Solver v10",
+        description="ReAct ML solver: persistent session + tool use + baseline safety net",
         url=args.card_url or f"http://{args.host}:{args.port}/",
-        version="9.0.0",
+        version="10.0.0",
         default_input_modes=["text/plain"],
         default_output_modes=["text/plain"],
         capabilities=AgentCapabilities(streaming=True),
